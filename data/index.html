@@ -9,24 +9,14 @@
             font-family: Arial, sans-serif;
             margin: 0;
             padding: 20px;
-            background-color: #f0f0f0;
         }
-        .container {
-            max-width: 600px;
-            margin: 0 auto;
-            background-color: #fff;
-            border-radius: 5px;
-            padding: 20px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        }
-        h1, h2 {
-            color: #333;
+        h1, h2, h3 {
+            margin-top: 0;
         }
         .tab {
             overflow: hidden;
             border: 1px solid #ccc;
             background-color: #f1f1f1;
-            border-radius: 5px 5px 0 0;
         }
         .tab button {
             background-color: inherit;
@@ -48,7 +38,6 @@
             padding: 20px;
             border: 1px solid #ccc;
             border-top: none;
-            border-radius: 0 0 5px 5px;
         }
         table {
             width: 100%;
@@ -81,36 +70,19 @@
             width: 100%;
             padding: 8px;
             border: 1px solid #ddd;
-            border-radius: 4px;
             box-sizing: border-box;
         }
         button {
-            background-color: #4CAF50;
-            color: white;
             padding: 10px 15px;
             border: none;
-            border-radius: 4px;
             cursor: pointer;
-        }
-        button:hover {
-            background-color: #45a049;
         }
         .status {
             padding: 10px;
             margin: 10px 0;
-            border-radius: 4px;
-        }
-        .status-connected {
-            background-color: #d4edda;
-            color: #155724;
-        }
-        .status-disconnected {
-            background-color: #f8d7da;
-            color: #721c24;
         }
         .pin-card {
             border: 1px solid #ddd;
-            border-radius: 4px;
             padding: 10px;
             margin-bottom: 10px;
             display: flex;
@@ -144,7 +116,6 @@
             bottom: 0;
             background-color: #ccc;
             transition: .4s;
-            border-radius: 25px;
         }
         .slider:before {
             position: absolute;
@@ -155,7 +126,6 @@
             bottom: 4px;
             background-color: white;
             transition: .4s;
-            border-radius: 50%;
         }
         input:checked + .slider {
             background-color: #2196F3;
@@ -166,12 +136,18 @@
         .loader {
             border: 4px solid #f3f3f3;
             border-top: 4px solid #3498db;
-            border-radius: 50%;
             width: 30px;
             height: 30px;
             animation: spin 2s linear infinite;
             margin: 20px auto;
             display: none;
+        }
+        .code-box {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border: 1px solid #ddd;
+            margin: 10px 0;
+            font-family: monospace;
         }
         @keyframes spin {
             0% { transform: rotate(0deg); }
@@ -180,113 +156,246 @@
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>M5StickC WiFi Debug Tool</h1>
+    <h1>M5StickC WiFi Debug Tool</h1>
+    
+    <div class="tab">
+        <button class="tablinks active" onclick="openTab(event, 'status')">Статус</button>
+        <button class="tablinks" onclick="openTab(event, 'wifi')">Wi-Fi</button>
+        <button class="tablinks" onclick="openTab(event, 'ap')">Точка доступа</button>
+        <button class="tablinks" onclick="openTab(event, 'kvm')">KVM</button>
+        <button class="tablinks" onclick="openTab(event, 'device')">Устройство</button>
+        <button class="tablinks" onclick="openTab(event, 'network')">Сеть</button>
+    </div>
+    
+    <!-- Вкладка статуса -->
+    <div id="status" class="tabcontent" style="display: block;">
+        <h2>Текущий статус</h2>
         
-        <div class="tab">
-            <button class="tablinks active" onclick="openTab(event, 'status')">Статус</button>
-            <button class="tablinks" onclick="openTab(event, 'wifi')">Wi-Fi</button>
-            <button class="tablinks" onclick="openTab(event, 'kvm')">KVM</button>
-            <button class="tablinks" onclick="openTab(event, 'diagnostic')">Диагностика</button>
+        <div id="wifi-status" class="status">
+            Статус WiFi: Загрузка...
         </div>
         
-        <!-- Вкладка статуса -->
-        <div id="status" class="tabcontent" style="display: block;">
-            <h2>Текущий статус</h2>
-            
-            <div id="wifi-status" class="status status-disconnected">
-                Статус WiFi: Загрузка...
-            </div>
-            
-            <div id="device-info">
-                <p><strong>Устройство:</strong> M5StickC PLUS2</p>
-                <p><strong>Режим:</strong> <span id="operation-mode">Загрузка...</span></p>
-                <p><strong>IP-адрес:</strong> <span id="ip-address">-</span></p>
-                <p><strong>Уровень сигнала:</strong> <span id="signal-strength">-</span></p>
-            </div>
-            
-            <button onclick="refreshStatus()">Обновить статус</button>
+        <div id="ap-status" class="status">
+            Статус AP: Загрузка...
         </div>
         
-        <!-- Вкладка Wi-Fi -->
-        <div id="wifi" class="tabcontent">
-            <h2>Управление Wi-Fi</h2>
+        <div id="device-info">
+            <p><strong>Устройство:</strong> M5StickC PLUS2</p>
+            <p><strong>Режим:</strong> <span id="operation-mode">Загрузка...</span></p>
+            <p><strong>IP-адрес:</strong> <span id="ip-address">-</span></p>
+            <p><strong>Уровень сигнала:</strong> <span id="signal-strength">-</span></p>
+            <p><strong>Батарея:</strong> <span id="battery-level">-</span></p>
+        </div>
+        
+        <button onclick="refreshStatus()">Обновить статус</button>
+    </div>
+    
+    <!-- Вкладка Wi-Fi -->
+    <div id="wifi" class="tabcontent">
+        <h2>Управление Wi-Fi</h2>
+        
+        <div class="form-group">
+            <button onclick="scanNetworks()">Сканировать сети</button>
+            <div class="loader" id="scan-loader"></div>
+        </div>
+        
+        <div class="network-list">
+            <table id="networks-table">
+                <thead>
+                    <tr>
+                        <th>SSID</th>
+                        <th>Сигнал</th>
+                        <th>Безопасность</th>
+                        <th>Канал</th>
+                        <th>Действие</th>
+                    </tr>
+                </thead>
+                <tbody id="networks-list">
+                    <tr>
+                        <td colspan="5">Нажмите "Сканировать сети" для поиска доступных WiFi сетей</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <h3>Подключение к сети</h3>
+        <form id="connect-form">
+            <div class="form-group">
+                <label for="ssid">SSID:</label>
+                <input type="text" id="ssid" name="ssid" required>
+            </div>
             
             <div class="form-group">
-                <button onclick="scanNetworks()">Сканировать сети</button>
-                <div class="loader" id="scan-loader"></div>
+                <label for="password">Пароль:</label>
+                <input type="password" id="password" name="password">
             </div>
             
-            <div class="network-list">
-                <table id="networks-table">
-                    <thead>
-                        <tr>
-                            <th>SSID</th>
-                            <th>Сигнал</th>
-                            <th>Безопасность</th>
-                            <th>Канал</th>
-                            <th>Действие</th>
-                        </tr>
-                    </thead>
-                    <tbody id="networks-list">
-                        <tr>
-                            <td colspan="5">Нажмите "Сканировать сети" для поиска доступных WiFi сетей</td>
-                        </tr>
-                    </tbody>
-                </table>
+            <button type="submit">Подключиться</button>
+        </form>
+    </div>
+    
+    <!-- Вкладка точки доступа -->
+    <div id="ap" class="tabcontent">
+        <h2>Настройки точки доступа</h2>
+        
+        <form id="ap-form">
+            <div class="form-group">
+                <label for="ap-mode">Режим:</label>
+                <select id="ap-mode" name="mode">
+                    <option value="0">Выключено</option>
+                    <option value="1">Обычный</option>
+                    <option value="2">Ретранслятор</option>
+                    <option value="3">Скрытый</option>
+                    <option value="4">Honeypot</option>
+                </select>
             </div>
             
-            <h3>Подключение к сети</h3>
-            <form id="connect-form">
-                <div class="form-group">
-                    <label for="ssid">SSID:</label>
-                    <input type="text" id="ssid" name="ssid" required>
-                </div>
-                
-                <div class="form-group">
-                    <label for="password">Пароль:</label>
-                    <input type="password" id="password" name="password">
-                </div>
-                
-                <button type="submit">Подключиться</button>
-            </form>
+            <div class="form-group">
+                <label for="ap-ssid">SSID:</label>
+                <input type="text" id="ap-ssid" name="ssid">
+            </div>
+            
+            <div class="form-group">
+                <label for="ap-password">Пароль:</label>
+                <input type="password" id="ap-password" name="password">
+            </div>
+            
+            <div class="form-group">
+                <label for="ap-channel">Канал:</label>
+                <select id="ap-channel" name="channel">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                    <option value="5">5</option>
+                    <option value="6">6</option>
+                    <option value="7">7</option>
+                    <option value="8">8</option>
+                    <option value="9">9</option>
+                    <option value="10">10</option>
+                    <option value="11">11</option>
+                    <option value="12">12</option>
+                    <option value="13">13</option>
+                </select>
+            </div>
+            
+            <button type="submit">Применить</button>
+        </form>
+        
+        <div id="honeypot-section" style="display: none; margin-top: 20px;">
+            <h3>Логи Honeypot</h3>
+            <button onclick="getHoneypotLogs()">Обновить логи</button>
+            
+            <div id="honeypot-logs">
+                <p>Нет записей</p>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Вкладка KVM -->
+    <div id="kvm" class="tabcontent">
+        <h2>Управление KVM</h2>
+        
+        <div id="pins-list">
+            <!-- Список пинов будет загружен динамически -->
+            <p>Загрузка пинов...</p>
         </div>
         
-        <!-- Вкладка KVM -->
-        <div id="kvm" class="tabcontent">
-            <h2>Управление KVM</h2>
-            
-            <div id="pins-list">
-                <!-- Список пинов будет загружен динамически -->
-                <p>Загрузка пинов...</p>
+        <h3>Добавить новый пин</h3>
+        <form id="add-pin-form">
+            <div class="form-group">
+                <label for="pin-number">Номер пина:</label>
+                <input type="number" id="pin-number" name="pin" min="0" max="40" required>
             </div>
             
-            <h3>Добавить новый пин</h3>
-            <form id="add-pin-form">
-                <div class="form-group">
-                    <label for="pin-number">Номер пина:</label>
-                    <input type="number" id="pin-number" name="pin" min="0" max="40" required>
-                </div>
-                
-                <div class="form-group">
-                    <label for="pin-name">Название:</label>
-                    <input type="text" id="pin-name" name="name" required>
-                </div>
-                
-                <button type="submit">Добавить пин</button>
-            </form>
+            <div class="form-group">
+                <label for="pin-name">Название:</label>
+                <input type="text" id="pin-name" name="name" required>
+            </div>
+            
+            <button type="submit">Добавить пин</button>
+        </form>
+        
+        <h3>Настройки мониторинга</h3>
+        <form id="connection-check-form">
+            <div class="form-group">
+                <label for="connection-check">Интервал проверки соединения:</label>
+                <select id="connection-check" name="interval">
+                    <option value="0">Выключен</option>
+                    <option value="1">10 секунд</option>
+                    <option value="2">30 секунд</option>
+                    <option value="3">1 минута</option>
+                    <option value="4">5 минут</option>
+                    <option value="5">30 минут</option>
+                </select>
+            </div>
+            
+            <button type="submit">Сохранить</button>
+        </form>
+        
+        <h3>API для управления через curl</h3>
+        <div class="code-box">
+            # Включение пина<br>
+            curl -X POST "http://{IP-адрес}/api/kvm/pin?index=0&state=1"<br><br>
+            
+            # Выключение пина<br>
+            curl -X POST "http://{IP-адрес}/api/kvm/pin?index=0&state=0"<br><br>
+            
+            # Переключение пина<br>
+            curl -X POST "http://{IP-адрес}/api/kvm/pin?index=0"
+        </div>
+    </div>
+    
+    <!-- Вкладка устройства -->
+    <div id="device" class="tabcontent">
+        <h2>Информация об устройстве</h2>
+        
+        <div id="device-details">
+            <p>Загрузка информации...</p>
         </div>
         
-        <!-- Вкладка диагностики -->
-        <div id="diagnostic" class="tabcontent">
-            <h2>Диагностика сети</h2>
-            
-            <button onclick="runDiagnostics()">Запустить диагностику</button>
-            <div class="loader" id="diagnostic-loader"></div>
-            
-            <div id="diagnostic-results">
-                <p>Нажмите "Запустить диагностику" для проверки сети</p>
+        <h3>Действия</h3>
+        <button onclick="findMe()">Найти устройство</button>
+        <p><small>Эта функция активирует звуковой сигнал на устройстве</small></p>
+    </div>
+    
+    <!-- Вкладка сетевых инструментов -->
+    <div id="network" class="tabcontent">
+        <h2>Сетевые инструменты</h2>
+        
+        <h3>Ping</h3>
+        <form id="ping-form">
+            <div class="form-group">
+                <label for="ping-host">Хост/IP:</label>
+                <input type="text" id="ping-host" name="host" required>
             </div>
+            
+            <button type="submit">Ping</button>
+        </form>
+        <div id="ping-result"></div>
+        
+        <h3>Сканирование IP-адресов</h3>
+        <form id="ip-scan-form">
+            <div class="form-group">
+                <label for="ip-range">Диапазон IP:</label>
+                <input type="text" id="ip-range" name="range" placeholder="192.168.1.1-192.168.1.254" required>
+            </div>
+            
+            <button type="submit">Сканировать</button>
+        </form>
+        <div id="ip-scan-result"></div>
+        
+        <h3>Блокировка IP (только для режима AP)</h3>
+        <form id="ip-block-form">
+            <div class="form-group">
+                <label for="block-ip">IP для блокировки:</label>
+                <input type="text" id="block-ip" name="ip" required>
+            </div>
+            
+            <button type="submit">Заблокировать</button>
+        </form>
+        <div id="blocked-ips">
+            <p>Нет заблокированных IP-адресов</p>
         </div>
     </div>
     
@@ -298,6 +407,7 @@
         document.addEventListener('DOMContentLoaded', function() {
             refreshStatus();
             loadKVMPins();
+            loadAPSettings();
             
             // Настройка обработчиков форм
             document.getElementById('connect-form').addEventListener('submit', function(e) {
@@ -308,6 +418,41 @@
             document.getElementById('add-pin-form').addEventListener('submit', function(e) {
                 e.preventDefault();
                 addNewPin();
+            });
+            
+            document.getElementById('ap-form').addEventListener('submit', function(e) {
+                e.preventDefault();
+                updateAPSettings();
+            });
+            
+            document.getElementById('connection-check-form').addEventListener('submit', function(e) {
+                e.preventDefault();
+                updateConnectionCheck();
+            });
+            
+            document.getElementById('ping-form').addEventListener('submit', function(e) {
+                e.preventDefault();
+                pingHost();
+            });
+            
+            document.getElementById('ip-scan-form').addEventListener('submit', function(e) {
+                e.preventDefault();
+                scanIPRange();
+            });
+            
+            document.getElementById('ip-block-form').addEventListener('submit', function(e) {
+                e.preventDefault();
+                blockIP();
+            });
+            
+            // Обработчик выбора режима AP
+            document.getElementById('ap-mode').addEventListener('change', function(e) {
+                const honeypotSection = document.getElementById('honeypot-section');
+                if (e.target.value === '4') { // Honeypot mode
+                    honeypotSection.style.display = 'block';
+                } else {
+                    honeypotSection.style.display = 'none';
+                }
             });
         });
         
@@ -336,6 +481,10 @@
                 refreshStatus();
             } else if (tabName === 'kvm') {
                 loadKVMPins();
+            } else if (tabName === 'ap') {
+                loadAPSettings();
+            } else if (tabName === 'device') {
+                loadDeviceInfo();
             }
         }
         
@@ -344,33 +493,46 @@
             fetch('/diagnostic')
                 .then(response => response.json())
                 .then(data => {
-                    // Обновляем информацию о статусе
+                    // Обновляем информацию о статусе WiFi
                     const wifiStatus = document.getElementById('wifi-status');
                     const ipAddress = document.getElementById('ip-address');
                     const signalStrength = document.getElementById('signal-strength');
                     const operationMode = document.getElementById('operation-mode');
+                    const batteryLevel = document.getElementById('battery-level');
                     
                     if (data.connected) {
-                        wifiStatus.className = 'status status-connected';
-                        wifiStatus.innerHTML = `Подключено к сети: ${data.ssid}`;
+                        wifiStatus.innerHTML = `<strong>WiFi:</strong> Подключено к сети: ${data.ssid}`;
                         ipAddress.textContent = data.ip;
                         signalStrength.textContent = `${data.rssi} dBm`;
                         operationMode.textContent = 'Клиент';
                         currentMode = 'client';
                     } else {
-                        wifiStatus.className = 'status status-disconnected';
-                        wifiStatus.innerHTML = 'Не подключено к WiFi';
+                        wifiStatus.innerHTML = '<strong>WiFi:</strong> Не подключено к WiFi';
                         ipAddress.textContent = '-';
                         signalStrength.textContent = '-';
-                        
-                        // Проверяем, находимся ли мы в режиме точки доступа
-                        if (window.location.hostname === '192.168.4.1') {
-                            operationMode.textContent = 'Точка доступа';
-                            currentMode = 'ap';
-                        } else {
-                            operationMode.textContent = 'Неизвестно';
-                            currentMode = 'unknown';
+                        operationMode.textContent = 'Неизвестно';
+                        currentMode = 'unknown';
+                    }
+                    
+                    // Обновляем информацию о точке доступа
+                    const apStatus = document.getElementById('ap-status');
+                    if (data.ap_mode !== undefined && data.ap_mode > 0) {
+                        let apModeName = 'Неизвестно';
+                        switch(data.ap_mode) {
+                            case 1: apModeName = 'Обычный'; break;
+                            case 2: apModeName = 'Ретранслятор'; break;
+                            case 3: apModeName = 'Скрытый'; break;
+                            case 4: apModeName = 'Honeypot'; break;
                         }
+                        
+                        apStatus.innerHTML = `<strong>Точка доступа:</strong> Активна (${apModeName}) - SSID: ${data.ap_ssid}, IP: ${data.ap_ip}, Клиентов: ${data.ap_stations}`;
+                    } else {
+                        apStatus.innerHTML = '<strong>Точка доступа:</strong> Выключена';
+                    }
+                    
+                    // Обновляем информацию о батарее
+                    if (data.battery) {
+                        batteryLevel.textContent = `${data.battery.toFixed(2)}V`;
                     }
                 })
                 .catch(error => {
@@ -486,6 +648,88 @@
             });
         }
         
+        // Функция для загрузки настроек точки доступа
+        function loadAPSettings() {
+            fetch('/ap')
+                .then(response => response.json())
+                .then(data => {
+                    // Заполняем форму настроек AP
+                    document.getElementById('ap-mode').value = data.mode;
+                    document.getElementById('ap-ssid').value = data.ssid;
+                    document.getElementById('ap-password').value = ''; // Пароль не загружаем по соображениям безопасности
+                    document.getElementById('ap-channel').value = data.channel;
+                    
+                    // Отображаем раздел honeypot если выбран соответствующий режим
+                    const honeypotSection = document.getElementById('honeypot-section');
+                    if (data.mode === 4) {
+                        honeypotSection.style.display = 'block';
+                        getHoneypotLogs();
+                    } else {
+                        honeypotSection.style.display = 'none';
+                    }
+                })
+                .catch(error => {
+                    console.error('Ошибка при загрузке настроек AP:', error);
+                });
+        }
+        
+        // Функция для обновления настроек точки доступа
+        function updateAPSettings() {
+            const formData = new FormData();
+            formData.append('mode', document.getElementById('ap-mode').value);
+            formData.append('ssid', document.getElementById('ap-ssid').value);
+            formData.append('password', document.getElementById('ap-password').value);
+            formData.append('channel', document.getElementById('ap-channel').value);
+            
+            fetch('/ap/config', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.text())
+            .then(result => {
+                alert(result);
+                // Обновляем статус
+                refreshStatus();
+                loadAPSettings();
+            })
+            .catch(error => {
+                console.error('Ошибка при обновлении настроек AP:', error);
+                alert('Ошибка при обновлении настроек AP');
+            });
+        }
+        
+        // Функция для получения логов honeypot
+        function getHoneypotLogs() {
+            fetch('/ap/honeypot/logs')
+                .then(response => response.json())
+                .then(data => {
+                    const logsDiv = document.getElementById('honeypot-logs');
+                    
+                    if (data.logs && data.logs.length > 0) {
+                        let logsHTML = '<table><tr><th>IP</th><th>Порт</th><th>Время</th><th>Данные</th></tr>';
+                        
+                        data.logs.forEach(log => {
+                            const date = new Date(log.timestamp);
+                            logsHTML += `<tr>
+                                <td>${log.ip}</td>
+                                <td>${log.port}</td>
+                                <td>${date.toLocaleString()}</td>
+                                <td>${log.data}</td>
+                            </tr>`;
+                        });
+                        
+                        logsHTML += '</table>';
+                        logsDiv.innerHTML = logsHTML;
+                    } else {
+                        logsDiv.innerHTML = '<p>Нет записей</p>';
+                    }
+                })
+                .catch(error => {
+                    console.error('Ошибка при получении логов honeypot:', error);
+                    document.getElementById('honeypot-logs').innerHTML = '<p>Ошибка при загрузке логов</p>';
+                });
+        }
+        
         // Функция для загрузки KVM пинов
         function loadKVMPins() {
             const pinsList = document.getElementById('pins-list');
@@ -494,6 +738,9 @@
             fetch('/kvm')
                 .then(response => response.json())
                 .then(data => {
+                    // Заполняем настройки интервала проверки соединения
+                    document.getElementById('connection-check').value = data.connectionCheck;
+                    
                     pinsList.innerHTML = '';
                     
                     if (data.pins && data.pins.length > 0) {
@@ -506,6 +753,19 @@
                             pinInfo.className = 'pin-info';
                             pinInfo.innerHTML = `<strong>${pin.name}</strong><br>Пин #${pin.pin}`;
                             pinCard.appendChild(pinInfo);
+                            
+                            // Режим мониторинга
+                            const monitorDiv = document.createElement('div');
+                            monitorDiv.innerHTML = `
+                                <label>Мониторинг:
+                                    <select onchange="changeMonitorMode(${index}, this.value)">
+                                        <option value="0" ${pin.monitorMode == 0 ? 'selected' : ''}>Выкл</option>
+                                        <option value="1" ${pin.monitorMode == 1 ? 'selected' : ''}>Вкл</option>
+                                        <option value="2" ${pin.monitorMode == 2 ? 'selected' : ''}>Звук</option>
+                                    </select>
+                                </label>
+                            `;
+                            pinCard.appendChild(monitorDiv);
                             
                             // Состояние пина
                             const pinState = document.createElement('div');
@@ -535,14 +795,35 @@
                 });
         }
         
+        // Функция для изменения режима мониторинга пина
+        function changeMonitorMode(pinIndex, mode) {
+            const formData = new FormData();
+            formData.append('index', pinIndex);
+            formData.append('monitor', mode);
+            
+            fetch('/kvm/pin', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.text())
+            .then(result => {
+                // Успешно обновлено
+            })
+            .catch(error => {
+                console.error('Ошибка при изменении режима мониторинга:', error);
+                alert('Ошибка при изменении режима мониторинга');
+                loadKVMPins(); // Перезагружаем пины для восстановления правильного состояния
+            });
+        }
+        
         // Функция для переключения состояния пина
         function togglePin(pinIndex) {
             // Формируем данные для отправки
             const formData = new FormData();
-            formData.append('pin', pinIndex);
+            formData.append('index', pinIndex);
             
             // Отправляем запрос
-            fetch('/kvm/toggle', {
+            fetch('/kvm/pin', {
                 method: 'POST',
                 body: formData
             })
@@ -556,6 +837,26 @@
                 alert('Ошибка при переключении пина');
                 // Обновляем список пинов для отображения текущего состояния
                 loadKVMPins();
+            });
+        }
+        
+        // Функция для обновления интервала проверки соединения
+        function updateConnectionCheck() {
+            const interval = document.getElementById('connection-check').value;
+            
+            fetch('/kvm/connectioncheck', {
+                method: 'POST',
+                body: new URLSearchParams({
+                    'interval': interval
+                })
+            })
+            .then(response => response.text())
+            .then(result => {
+                alert(result);
+            })
+            .catch(error => {
+                console.error('Ошибка при обновлении интервала проверки:', error);
+                alert('Ошибка при обновлении интервала проверки');
             });
         }
         
@@ -607,80 +908,86 @@
             });
         }
         
-        // Функция для запуска диагностики
-        function runDiagnostics() {
-            // Показываем индикатор загрузки
-            const loader = document.getElementById('diagnostic-loader');
-            loader.style.display = 'block';
-            
-            // Очищаем текущие результаты
-            const diagnosticResults = document.getElementById('diagnostic-results');
-            diagnosticResults.innerHTML = '<p>Запуск диагностики...</p>';
-            
+        // Функция для загрузки информации об устройстве
+        function loadDeviceInfo() {
             fetch('/diagnostic')
                 .then(response => response.json())
                 .then(data => {
-                    // Скрываем индикатор загрузки
-                    loader.style.display = 'none';
+                    const deviceDetails = document.getElementById('device-details');
+                    let html = '<table>';
                     
-                    // Формируем HTML с результатами
-                    let resultsHTML = '<h3>Результаты диагностики</h3>';
+                    // Информация о железе и программном обеспечении
+                    html += '<tr><th colspan="2">Железо</th></tr>';
+                    html += `<tr><td>Модель</td><td>M5StickC PLUS2</td></tr>`;
+                    html += `<tr><td>Батарея</td><td>${data.battery ? data.battery.toFixed(2) + 'V' : 'N/A'}</td></tr>`;
                     
+                    // Информация о WiFi
+                    html += '<tr><th colspan="2">WiFi</th></tr>';
                     if (data.connected) {
-                        resultsHTML += `
-                            <div class="status status-connected">
-                                <p>Устройство подключено к сети WiFi</p>
-                            </div>
-                            <table>
-                                <tr>
-                                    <th>Параметр</th>
-                                    <th>Значение</th>
-                                </tr>
-                                <tr>
-                                    <td>SSID</td>
-                                    <td>${data.ssid}</td>
-                                </tr>
-                                <tr>
-                                    <td>Уровень сигнала</td>
-                                    <td>${data.rssi} dBm</td>
-                                </tr>
-                                <tr>
-                                    <td>IP-адрес</td>
-                                    <td>${data.ip}</td>
-                                </tr>
-                                <tr>
-                                    <td>Шлюз</td>
-                                    <td>${data.gateway}</td>
-                                </tr>
-                                <tr>
-                                    <td>Маска подсети</td>
-                                    <td>${data.subnet}</td>
-                                </tr>
-                                <tr>
-                                    <td>DNS-сервер</td>
-                                    <td>${data.dns}</td>
-                                </tr>
-                            </table>
-                        `;
+                        html += `<tr><td>SSID</td><td>${data.ssid}</td></tr>`;
+                        html += `<tr><td>Сигнал</td><td>${data.rssi} dBm</td></tr>`;
+                        html += `<tr><td>IP-адрес</td><td>${data.ip}</td></tr>`;
+                        html += `<tr><td>Маска подсети</td><td>${data.subnet}</td></tr>`;
+                        html += `<tr><td>Шлюз</td><td>${data.gateway}</td></tr>`;
+                        html += `<tr><td>DNS</td><td>${data.dns}</td></tr>`;
                     } else {
-                        resultsHTML += `
-                            <div class="status status-disconnected">
-                                <p>Устройство не подключено к сети WiFi</p>
-                                <p>Для проведения диагностики необходимо подключиться к WiFi сети</p>
-                            </div>
-                        `;
+                        html += `<tr><td colspan="2">Не подключено к WiFi</td></tr>`;
                     }
                     
-                    diagnosticResults.innerHTML = resultsHTML;
+                    // Информация о точке доступа
+                    html += '<tr><th colspan="2">Точка доступа</th></tr>';
+                    if (data.ap_mode !== undefined && data.ap_mode > 0) {
+                        let apModeName = 'Неизвестно';
+                        switch(data.ap_mode) {
+                            case 1: apModeName = 'Обычный'; break;
+                            case 2: apModeName = 'Ретранслятор'; break;
+                            case 3: apModeName = 'Скрытый'; break;
+                            case 4: apModeName = 'Honeypot'; break;
+                        }
+                        
+                        html += `<tr><td>Режим</td><td>${apModeName}</td></tr>`;
+                        html += `<tr><td>SSID</td><td>${data.ap_ssid}</td></tr>`;
+                        html += `<tr><td>IP-адрес</td><td>${data.ap_ip}</td></tr>`;
+                        html += `<tr><td>Подключено клиентов</td><td>${data.ap_stations}</td></tr>`;
+                    } else {
+                        html += `<tr><td colspan="2">Точка доступа выключена</td></tr>`;
+                    }
+                    
+                    html += '</table>';
+                    deviceDetails.innerHTML = html;
                 })
                 .catch(error => {
-                    // Скрываем индикатор загрузки
-                    loader.style.display = 'none';
-                    
-                    // Отображаем ошибку
-                    diagnosticResults.innerHTML = '<p>Ошибка при проведении диагностики</p>';
-                    console.error('Ошибка при диагностике:', error);
+                    console.error('Ошибка при загрузке информации об устройстве:', error);
+                    document.getElementById('device-details').innerHTML = '<p>Ошибка при загрузке информации</p>';
                 });
+        }
+        
+        // Функция активации звукового сигнала "Найти меня"
+        function findMe() {
+            fetch('/device/findme', {
+                method: 'POST'
+            })
+            .then(response => response.text())
+            .then(result => {
+                alert('Звуковой сигнал активирован');
+            })
+            .catch(error => {
+                console.error('Ошибка при активации сигнала:', error);
+                alert('Ошибка при активации сигнала');
+            });
+        }
+        
+        // Заглушки для сетевых функций (будут реализованы позже)
+        function pingHost() {
+            alert('Функция Ping в разработке');
+        }
+        
+        function scanIPRange() {
+            alert('Функция сканирования IP в разработке');
+        }
+        
+        function blockIP() {
+            alert('Функция блокировки IP в разработке');
         }
     </script>
 </body>

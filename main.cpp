@@ -5,6 +5,14 @@
 #include <AsyncTCP.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <vector>
+
+// Подключаем модули
+#include "kvm_module.h"
+#include "honeypot.h"
+#include "network_tools.h"
+#include "device_manager.h"
+#include "ir_controller.h"
 
 // Определение разделов меню
 enum MenuSection {
@@ -31,38 +39,12 @@ enum APMode {
   AP_MODE_HONEYPOT  // Режим ловушки
 };
 
-// Режимы мониторинга пинов
-enum PinMonitorMode {
-  PIN_MONITOR_OFF,  // Выключен
-  PIN_MONITOR_ON,   // Включен
-  PIN_MONITOR_BUZZ  // Со звуком
-};
-
-// Интервалы проверки соединения
-enum ConnectionCheckInterval {
-  CHECK_OFF,    // Выключено
-  CHECK_10SEC,  // 10 секунд
-  CHECK_30SEC,  // 30 секунд
-  CHECK_1MIN,   // 1 минута
-  CHECK_5MIN,   // 5 минут
-  CHECK_30MIN   // 30 минут
-};
-
 // Структура для хранения результатов сканирования WiFi
 struct WiFiResult {
   String ssid;
   int32_t rssi;
   uint8_t encryptionType;
   int32_t channel;
-};
-
-// Расширенная структура для пинов
-struct EnhancedPinConfig {
-  int pin;
-  String name;
-  bool state;
-  PinMonitorMode monitorMode;
-  unsigned long lastStateChange;
 };
 
 // Расширенная конфигурация для AP режима
@@ -72,15 +54,6 @@ struct APConfig {
   String password;
   bool hidden;
   int channel;
-};
-
-// Для honeypot режима - буфер для логирования соединений
-#define MAX_HONEYPOT_CONNECTIONS 10
-struct HoneypotConnection {
-  IPAddress clientIP;
-  uint16_t port;
-  String requestData;
-  unsigned long timestamp;
 };
 
 // Описание пунктов главного меню
@@ -113,14 +86,14 @@ AsyncWebServer server(80);               // Веб-сервер на порту 
 WiFiManager wifiManager;                 // Менеджер WiFi
 APConfig apConfig = {AP_MODE_OFF, "M5StickDebug", "12345678", false, 1}; // Конфигурация AP
 
-std::vector<EnhancedPinConfig> kvmPins;  // Пины для KVM
 std::vector<WiFiResult> networks;        // Список найденных сетей
-HoneypotConnection honeypotLog[MAX_HONEYPOT_CONNECTIONS]; // Лог для honeypot
-int honeypotLogCount = 0;                // Количество записей в логе honeypot
 
-ConnectionCheckInterval connectionCheckInterval = CHECK_OFF; // Интервал проверки соединения
-unsigned long lastConnectionCheck = 0;    // Время последней проверки соединения
-bool useDHCP = true;                     // Использовать DHCP или нет
+// Модули
+KVMModule kvmModule(&server);
+Honeypot honeypot(&server);
+NetworkTools networkTools(&server);
+DeviceManager deviceManager(&server);
+IRController irController(&server);
 
 // Буфер для сообщений на дисплее
 char displayBuffer[128];
@@ -140,12 +113,11 @@ void drawMenu();
 void handleMenuAction();
 void scanWiFiNetworks();
 void updateAccessPointMode();
-void togglePin(int pinIndex);
 void performNetworkDiagnostics();
 void saveConfiguration();
 void loadConfiguration();
+void playFindMeSound();
 
-// Функция инициализации
 void setup() {
   // Инициализация M5StickCPlus2
   M5.begin();
@@ -161,6 +133,13 @@ void setup() {
   
   // Настройка экрана
   setupDisplay();
+  
+  // Инициализация модулей
+  kvmModule.begin();
+  networkTools.setupAPI();
+  honeypot.setupAPI();
+  deviceManager.begin();
+  irController.begin();
   
   // Настройка WiFi
   setupWiFi();
@@ -179,40 +158,21 @@ void setup() {
   drawMenu();
 }
 
-// Основной цикл
 void loop() {
   // Обновление состояния кнопок
   M5.update();
   handleButtons();
   
-  // Проверка соединения по таймеру (если активирована)
-  if (connectionCheckInterval != CHECK_OFF) {
-    unsigned long currentMillis = millis();
-    unsigned long checkInterval = 0;
-    
-    switch (connectionCheckInterval) {
-      case CHECK_10SEC: checkInterval = 10000; break;
-      case CHECK_30SEC: checkInterval = 30000; break;
-      case CHECK_1MIN:  checkInterval = 60000; break;
-      case CHECK_5MIN:  checkInterval = 300000; break;
-      case CHECK_30MIN: checkInterval = 1800000; break;
-      default: break;
-    }
-    
-    if (checkInterval > 0 && currentMillis - lastConnectionCheck > checkInterval) {
-      lastConnectionCheck = currentMillis;
-      // Выполняем проверку соединения и обновляем информацию
-      if (currentSection == MENU_KVM_MONITOR) {
-        performNetworkDiagnostics();
-      }
-    }
+  // Проверка соединения по таймеру
+  kvmModule.performConnectionCheck();
+  
+  // Мониторинг пинов
+  if (currentSection == MENU_KVM_MONITOR) {
+    kvmModule.updatePinMonitoring();
   }
   
-  // Обработка различных режимов
-  if (currentSection == MENU_KVM_MONITOR) {
-    // Обновляем состояние мониторинга пинов
-    updatePinMonitoring();
-  }
+  // Обновление информации о состоянии устройства
+  deviceManager.update();
   
   // Небольшая задержка для стабильности
   delay(50);
@@ -272,10 +232,18 @@ void setupWiFi() {
       updateAccessPointMode();
     }
   }
+  
+  // Обновляем режим AP для сетевых инструментов
+  networkTools.setAPMode(apConfig.mode != AP_MODE_OFF);
 }
 
 // Обновление режима точки доступа
 void updateAccessPointMode() {
+  // Если был активен режим honeypot, выключаем его
+  if (honeypot.isActive()) {
+    honeypot.stop();
+  }
+  
   switch (apConfig.mode) {
     case AP_MODE_OFF:
       // Выключаем режим AP если был активен
@@ -311,12 +279,13 @@ void updateAccessPointMode() {
       break;
       
     case AP_MODE_HONEYPOT:
-      // Режим ловушки - открытая сеть без пароля
-      WiFi.mode(WIFI_AP);
-      WiFi.softAP(apConfig.ssid.c_str(), "", apConfig.channel);
-      honeypotLogCount = 0; // Сбрасываем счетчик логов
+      // Режим ловушки
+      honeypot.start(apConfig.ssid, apConfig.channel);
       break;
   }
+  
+  // Обновляем состояние AP для сетевых инструментов
+  networkTools.setAPMode(apConfig.mode != AP_MODE_OFF);
   
   // Сохраняем конфигурацию
   saveConfiguration();
@@ -408,24 +377,6 @@ void setupWebServer() {
     request->send(200, "text/plain", "AP settings updated");
   });
   
-  // Маршрут для просмотра логов honeypot
-  server.on("/ap/honeypot/logs", HTTP_GET, [](AsyncWebServerRequest *request){
-    DynamicJsonDocument doc(2048);
-    JsonArray logsArray = doc.createNestedArray("logs");
-    
-    for (int i = 0; i < honeypotLogCount; i++) {
-      JsonObject log = logsArray.createNestedObject();
-      log["ip"] = honeypotLog[i].clientIP.toString();
-      log["port"] = honeypotLog[i].port;
-      log["timestamp"] = honeypotLog[i].timestamp;
-      log["data"] = honeypotLog[i].requestData;
-    }
-    
-    String response;
-    serializeJson(doc, response);
-    request->send(200, "application/json", response);
-  });
-  
   // Маршрут для подключения к сети
   server.on("/connect", HTTP_POST, [](AsyncWebServerRequest *request){
     // Проверяем наличие необходимых параметров
@@ -455,154 +406,6 @@ void setupWebServer() {
     request->send(200, "text/plain", "Connecting to network...");
   });
   
-  // Маршрут для управления GPIO (KVM)
-  server.on("/kvm", HTTP_GET, [](AsyncWebServerRequest *request){
-    // Формирование JSON с состоянием пинов
-    DynamicJsonDocument doc(2048);
-    JsonArray pinsArray = doc.createNestedArray("pins");
-    
-    for (const auto& pin : kvmPins) {
-      JsonObject pinObj = pinsArray.createNestedObject();
-      pinObj["pin"] = pin.pin;
-      pinObj["name"] = pin.name;
-      pinObj["state"] = pin.state;
-      pinObj["monitorMode"] = pin.monitorMode;
-    }
-    
-    doc["connectionCheck"] = (int)connectionCheckInterval;
-    doc["useDHCP"] = useDHCP;
-    
-    String response;
-    serializeJson(doc, response);
-    request->send(200, "application/json", response);
-  });
-  
-  // Маршрут для управления состоянием пина
-  server.on("/kvm/pin", HTTP_POST, [](AsyncWebServerRequest *request){
-    if (!request->hasParam("index", true)) {
-      request->send(400, "text/plain", "Missing pin index parameter");
-      return;
-    }
-    
-    int pinIndex = request->getParam("index", true)->value().toInt();
-    
-    // Проверяем, существует ли такой пин
-    if (pinIndex >= 0 && pinIndex < kvmPins.size()) {
-      // Если указан параметр state, меняем состояние
-      if (request->hasParam("state", true)) {
-        bool newState = (request->getParam("state", true)->value() == "true" || 
-                         request->getParam("state", true)->value() == "1");
-        kvmPins[pinIndex].state = newState;
-        digitalWrite(kvmPins[pinIndex].pin, newState ? HIGH : LOW);
-      } else {
-        // Иначе просто переключаем
-        togglePin(pinIndex);
-      }
-      
-      // Если указан режим мониторинга
-      if (request->hasParam("monitor", true)) {
-        int mode = request->getParam("monitor", true)->value().toInt();
-        if (mode >= PIN_MONITOR_OFF && mode <= PIN_MONITOR_BUZZ) {
-          kvmPins[pinIndex].monitorMode = (PinMonitorMode)mode;
-        }
-      }
-      
-      // Сохраняем конфигурацию
-      saveConfiguration();
-      
-      request->send(200, "text/plain", "Pin updated");
-    } else {
-      request->send(404, "text/plain", "Pin not found");
-    }
-  });
-  
-  // API для управления через curl
-  server.on("/api/kvm/pin", HTTP_POST, [](AsyncWebServerRequest *request){
-    // Тот же функционал, что и в /kvm/pin, но в формате API
-    // для совместимости с curl и скриптами
-    if (!request->hasParam("index", true)) {
-      request->send(400, "application/json", "{\"error\":\"Missing pin index parameter\"}");
-      return;
-    }
-    
-    int pinIndex = request->getParam("index", true)->value().toInt();
-    
-    if (pinIndex >= 0 && pinIndex < kvmPins.size()) {
-      if (request->hasParam("state", true)) {
-        bool newState = (request->getParam("state", true)->value() == "true" || 
-                         request->getParam("state", true)->value() == "1");
-        kvmPins[pinIndex].state = newState;
-        digitalWrite(kvmPins[pinIndex].pin, newState ? HIGH : LOW);
-      } else {
-        togglePin(pinIndex);
-      }
-      
-      // Формируем JSON с результатом
-      DynamicJsonDocument doc(256);
-      doc["success"] = true;
-      doc["pin"] = kvmPins[pinIndex].pin;
-      doc["state"] = kvmPins[pinIndex].state;
-      
-      String response;
-      serializeJson(doc, response);
-      request->send(200, "application/json", response);
-    } else {
-      request->send(404, "application/json", "{\"error\":\"Pin not found\"}");
-    }
-  });
-  
-  // Маршрут для добавления нового пина
-  server.on("/kvm/add", HTTP_POST, [](AsyncWebServerRequest *request){
-    if (!request->hasParam("pin", true) || !request->hasParam("name", true)) {
-      request->send(400, "text/plain", "Missing pin or name parameter");
-      return;
-    }
-    
-    int pin = request->getParam("pin", true)->value().toInt();
-    String name = request->getParam("name", true)->value();
-    
-    // Проверяем, не существует ли уже такой пин
-    for (const auto& p : kvmPins) {
-      if (p.pin == pin) {
-        request->send(400, "text/plain", "Pin already configured");
-        return;
-      }
-    }
-    
-    // Добавляем новый пин
-    EnhancedPinConfig newPin = {
-      pin, 
-      name, 
-      false, 
-      PIN_MONITOR_OFF, 
-      0
-    };
-    kvmPins.push_back(newPin);
-    
-    // Настраиваем пин как выход
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW);
-    
-    // Сохраняем конфигурацию
-    saveConfiguration();
-    
-    request->send(200, "text/plain", "Pin added successfully");
-  });
-  
-  // Маршрут для настройки интервала проверки соединения
-  server.on("/kvm/connectioncheck", HTTP_POST, [](AsyncWebServerRequest *request){
-    if (request->hasParam("interval", true)) {
-      int interval = request->getParam("interval", true)->value().toInt();
-      if (interval >= CHECK_OFF && interval <= CHECK_30MIN) {
-        connectionCheckInterval = (ConnectionCheckInterval)interval;
-        saveConfiguration();
-        request->send(200, "text/plain", "Connection check interval updated");
-        return;
-      }
-    }
-    request->send(400, "text/plain", "Invalid interval parameter");
-  });
-  
   // Маршрут для диагностики сети
   server.on("/diagnostic", HTTP_GET, [](AsyncWebServerRequest *request){
     performNetworkDiagnostics();
@@ -625,7 +428,9 @@ void setupWebServer() {
     }
     
     // Информация об устройстве
-    doc["battery"] = M5.Power.getBatteryVoltage() / 1000.0;
+    const SensorData& sensorData = deviceManager.getSensorData();
+    doc["battery"] = sensorData.batteryVoltage;
+    doc["batteryPercentage"] = sensorData.batteryPercentage;
     
     String response;
     serializeJson(doc, response);
@@ -635,7 +440,7 @@ void setupWebServer() {
   // API для поиска устройства (Find Me)
   server.on("/device/findme", HTTP_POST, [](AsyncWebServerRequest *request){
     // Запуск звукового сигнала
-    playFindMeSound();
+    deviceManager.playFindMe();
     request->send(200, "text/plain", "Find Me signal activated");
   });
   
@@ -645,14 +450,7 @@ void setupWebServer() {
 
 // Функция воспроизведения сигнала "Find Me"
 void playFindMeSound() {
-  // Воспроизводим звуковой сигнал прерывисто
-  for (int i = 0; i < 5; i++) {
-    M5.Speaker.tone(2000, 200);
-    delay(300);
-    M5.Speaker.tone(1500, 200);
-    delay(300);
-  }
-  M5.Speaker.mute();
+  deviceManager.playFindMe();
 }
 
 // Обработка нажатий кнопок
@@ -685,12 +483,12 @@ void handleButtons() {
     } else if (!buttonCLongPress && millis() - buttonCLastPress > 3000) {
       // Долгое нажатие на C - вкл/выкл устройства
       buttonCLongPress = true;
-      // Здесь можно реализовать выключение или переход в режим сна
+      // Выключение устройства
       M5.Lcd.fillScreen(BLACK);
       M5.Lcd.setCursor(0, 0);
       M5.Lcd.println("Shutting down...");
       delay(1000);
-      M5.Power.powerOff()
+      deviceManager.powerOff();
     }
   } else {
     if (buttonCLastPress > 0 && !buttonCLongPress) {
@@ -703,7 +501,7 @@ void handleButtons() {
         drawMenu();
       }
     }
-    buttonCLastPress = A0;
+    buttonCLastPress = 0;
     buttonCLongPress = false;
   }
   
@@ -717,9 +515,17 @@ void handleButtons() {
       case MENU_AP_OPTIONS:
         maxItems = AP_OPTIONS_ITEMS_COUNT;
         break;
-      // Другие секции меню
-      default:
-        maxItems = 5; // По умолчанию
+      case MENU_WIFI_SCAN:
+        maxItems = networks.size() > 0 ? networks.size() : 1;
+        break;
+      case MENU_KVM_OPTIONS:
+        // Пины + доп. пункты меню (интервал проверки, DHCP, возврат)
+        maxItems = kvmModule.getPins().size() + 3;
+        break;
+      case MENU_KVM_MONITOR:
+      case MENU_IR_CONTROL:
+        maxItems = 1; // Только возврат в главное меню
+        break;
     }
     
     if (selectedMenuItem < maxItems - 1) {
@@ -741,8 +547,9 @@ void drawMenu() {
   M5.Lcd.setTextSize(1);
   
   // Отображаем заголовок и заряд батареи
+  const SensorData& sensorData = deviceManager.getSensorData();
   char batteryBuf[20];
-  sprintf(batteryBuf, "Batt: %.2fV", M5.Axp.GetBatVoltage());
+  sprintf(batteryBuf, "Batt: %.2fV", sensorData.batteryVoltage);
   
   switch (currentSection) {
     case MENU_MAIN:
@@ -864,11 +671,12 @@ void drawMenu() {
       y += 16;
       
       // Отображаем состояние пинов
-      for (int i = 0; i < kvmPins.size() && y < M5.Lcd.height(); i++) {
+      const auto& pins = kvmModule.getPins();
+      for (int i = 0; i < pins.size() && y < M5.Lcd.height(); i++) {
         M5.Lcd.setCursor(5, y);
-        M5.Lcd.print(kvmPins[i].name);
+        M5.Lcd.print(pins[i].name);
         M5.Lcd.print(": ");
-        if (kvmPins[i].state) {
+        if (pins[i].state) {
           M5.Lcd.print("ON");
         } else {
           M5.Lcd.print("OFF");
@@ -879,14 +687,15 @@ void drawMenu() {
       
     case MENU_KVM_OPTIONS:
       // Меню настроек KVM
-      // В этом режиме можно настраивать пины и интервалы
       M5.Lcd.setCursor(5, y);
       M5.Lcd.print("Configure KVM pins:");
       y += 16;
       
-      for (int i = 0; i < kvmPins.size() && y < M5.Lcd.height() - 30; i++) {
+      // Отображаем список пинов
+      const auto& kvmPins = kvmModule.getPins();
+      for (int i = menuStartPosition; i < kvmPins.size() && i < menuStartPosition + displayLines - 3; i++) {
         M5.Lcd.setCursor(5, y);
-        if (i + menuStartPosition == selectedMenuItem) {
+        if (i == selectedMenuItem) {
           M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
           M5.Lcd.setTextColor(WHITE);
         }
@@ -901,13 +710,13 @@ void drawMenu() {
       // Добавляем дополнительные пункты меню
       if (y < M5.Lcd.height() - 30) {
         M5.Lcd.setCursor(5, y);
-        if (kvmPins.size() + menuStartPosition == selectedMenuItem) {
+        if (kvmPins.size() == selectedMenuItem) {
           M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
           M5.Lcd.setTextColor(WHITE);
         }
         M5.Lcd.print("Connection Check: ");
         
-        switch (connectionCheckInterval) {
+        switch (kvmModule.getConnectionCheckInterval()) {
           case CHECK_OFF:    M5.Lcd.print("OFF"); break;
           case CHECK_10SEC:  M5.Lcd.print("10s"); break;
           case CHECK_30SEC:  M5.Lcd.print("30s"); break;
@@ -922,19 +731,19 @@ void drawMenu() {
       
       if (y < M5.Lcd.height() - 15) {
         M5.Lcd.setCursor(5, y);
-        if (kvmPins.size() + 1 + menuStartPosition == selectedMenuItem) {
+        if (kvmPins.size() + 1 == selectedMenuItem) {
           M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
           M5.Lcd.setTextColor(WHITE);
         }
         M5.Lcd.print("Use DHCP: ");
-        M5.Lcd.print(useDHCP ? "YES" : "NO");
+        M5.Lcd.print(kvmModule.getUseDHCP() ? "YES" : "NO");
         y += 16;
         M5.Lcd.setTextColor(WHITE);
       }
       
       if (y < M5.Lcd.height()) {
         M5.Lcd.setCursor(5, y);
-        if (kvmPins.size() + 2 + menuStartPosition == selectedMenuItem) {
+        if (kvmPins.size() + 2 == selectedMenuItem) {
           M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
           M5.Lcd.setTextColor(WHITE);
         }
@@ -944,18 +753,39 @@ void drawMenu() {
       break;
       
     case MENU_IR_CONTROL:
-      // Заглушка для ИК-управления
+      // Отображаем доступные IR-команды
       M5.Lcd.setCursor(5, y);
-      M5.Lcd.print("IR Control - Coming Soon");
-      y += 16;
+      const auto& irCommands = irController.getCommands();
+      if (irCommands.size() > 0) {
+        // Заголовок
+        M5.Lcd.print("IR Commands:");
+        y += 16;
+        
+        for (int i = menuStartPosition; i < irCommands.size() && i < menuStartPosition + displayLines - 2; i++) {
+          M5.Lcd.setCursor(5, y);
+          if (i == selectedMenuItem) {
+            M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
+            M5.Lcd.setTextColor(WHITE);
+          }
+          M5.Lcd.print(irCommands[i].name);
+          y += 16;
+          M5.Lcd.setTextColor(WHITE);
+        }
+      } else {
+        M5.Lcd.print("No IR commands yet");
+        y += 16;
+        M5.Lcd.setCursor(5, y);
+        M5.Lcd.print("Use web interface to add");
+        y += 32;
+      }
+      
       M5.Lcd.setCursor(5, y);
-      M5.Lcd.print("This feature is not");
-      y += 16;
-      M5.Lcd.setCursor(5, y);
-      M5.Lcd.print("implemented yet.");
-      y += 32;
-      M5.Lcd.setCursor(5, y);
-      M5.Lcd.print("Press A to return");
+      if (irCommands.size() > 0 ? selectedMenuItem == irCommands.size() : selectedMenuItem == 0) {
+        M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
+        M5.Lcd.setTextColor(WHITE);
+      }
+      M5.Lcd.print("Back to Main Menu");
+      M5.Lcd.setTextColor(WHITE);
       break;
   }
   
@@ -1049,14 +879,64 @@ void handleMenuAction() {
             M5.Lcd.println("Unknown");
         }
         
-        M5.Lcd.println("\nPress any button to return");
+        M5.Lcd.println("\nConnect to this network?");
+        M5.Lcd.println("A:Yes B:No");
         
-        // Ждем нажатия любой кнопки для возврата
+        // Ждем нажатия кнопки
         bool buttonPressed = false;
+        bool connectToNetwork = false;
         while (!buttonPressed) {
           M5.update();
-          buttonPressed = M5.BtnA.wasPressed() || M5.BtnB.wasPressed() || M5.BtnC.wasPressed();
+          
+          if (M5.BtnA.wasPressed()) {
+            // Пользователь хочет подключиться к сети
+            buttonPressed = true;
+            connectToNetwork = true;
+          } else if (M5.BtnB.wasPressed() || M5.BtnC.wasPressed()) {
+            // Пользователь отменил подключение
+            buttonPressed = true;
+          }
+          
           delay(50);
+        }
+        
+        if (connectToNetwork) {
+          // Показываем экран для ввода пароля (в упрощенном варианте)
+          M5.Lcd.fillScreen(BLACK);
+          M5.Lcd.setCursor(0, 0);
+          M5.Lcd.println("Connecting...");
+          M5.Lcd.println("-----------------");
+          
+          // Отключаем текущий режим AP, если активен
+          if (apConfig.mode != AP_MODE_OFF) {
+            apConfig.mode = AP_MODE_OFF;
+            updateAccessPointMode();
+          }
+          
+          // Пробуем подключиться к сети без пароля (для открытых сетей)
+          WiFi.disconnect();
+          WiFi.begin(networks[selectedMenuItem].ssid.c_str(), "");
+          
+          // В реальной реализации тут должен быть экран ввода пароля
+          
+          M5.Lcd.println("Waiting for connection...");
+          
+          int timeout = 0;
+          while (WiFi.status() != WL_CONNECTED && timeout < 10) {
+            delay(1000);
+            M5.Lcd.print(".");
+            timeout++;
+          }
+          
+          if (WiFi.status() == WL_CONNECTED) {
+            M5.Lcd.println("\nConnected!");
+          } else {
+            M5.Lcd.println("\nFailed. Use web interface");
+            M5.Lcd.println("for password protected");
+            M5.Lcd.println("networks.");
+          }
+          
+          delay(3000);
         }
       } else {
         // Если нет сетей или пользователь нажал в пустом месте, запускаем сканирование
@@ -1064,18 +944,22 @@ void handleMenuAction() {
       }
       break;
       
-    case MENU_KVM_OPTIONS:
+    case MENU_KVM_OPTIONS: {
+      const auto& kvmPins = kvmModule.getPins();
+      
       if (selectedMenuItem >= 0 && selectedMenuItem < kvmPins.size()) {
         // Управление пином KVM
-        togglePin(selectedMenuItem);
+        kvmModule.togglePin(selectedMenuItem);
       } else if (selectedMenuItem == kvmPins.size()) {
         // Изменение интервала проверки соединения
-        connectionCheckInterval = (ConnectionCheckInterval)(((int)connectionCheckInterval + 1) % 6);
-        saveConfiguration();
+        ConnectionCheckInterval currentInterval = kvmModule.getConnectionCheckInterval();
+        ConnectionCheckInterval newInterval = static_cast<ConnectionCheckInterval>(
+          (static_cast<int>(currentInterval) + 1) % 6
+        );
+        kvmModule.setConnectionCheckInterval(newInterval);
       } else if (selectedMenuItem == kvmPins.size() + 1) {
         // Переключение DHCP
-        useDHCP = !useDHCP;
-        saveConfiguration();
+        kvmModule.setUseDHCP(!kvmModule.getUseDHCP());
       } else if (selectedMenuItem == kvmPins.size() + 2) {
         // Возврат в главное меню
         currentSection = MENU_MAIN;
@@ -1083,6 +967,7 @@ void handleMenuAction() {
         menuStartPosition = 0;
       }
       break;
+    }
       
     case MENU_KVM_MONITOR:
       // Возврат в главное меню при нажатии на любом элементе
@@ -1091,12 +976,29 @@ void handleMenuAction() {
       menuStartPosition = 0;
       break;
       
-    case MENU_IR_CONTROL:
-      // Возврат в главное меню при нажатии на любом элементе
-      currentSection = MENU_MAIN;
-      selectedMenuItem = 0;
-      menuStartPosition = 0;
+    case MENU_IR_CONTROL: {
+      const auto& irCommands = irController.getCommands();
+      
+      if (irCommands.size() > 0 && selectedMenuItem < irCommands.size()) {
+        // Отправляем ИК-команду
+        irController.transmitCommand(selectedMenuItem);
+        
+        M5.Lcd.fillScreen(BLACK);
+        M5.Lcd.setCursor(0, 0);
+        M5.Lcd.println("Transmitting IR...");
+        M5.Lcd.println("-----------------");
+        M5.Lcd.print("Command: ");
+        M5.Lcd.println(irCommands[selectedMenuItem].name);
+        
+        delay(1500); // Показываем информацию 1.5 секунды
+      } else {
+        // Возврат в главное меню
+        currentSection = MENU_MAIN;
+        selectedMenuItem = 0;
+        menuStartPosition = 0;
+      }
       break;
+    }
   }
   
   // Перерисовываем меню после действия
@@ -1146,46 +1048,6 @@ void scanWiFiNetworks() {
   drawMenu();
 }
 
-// Мониторинг пинов для KVM
-void updatePinMonitoring() {
-  for (auto& pin : kvmPins) {
-    if (pin.monitorMode != PIN_MONITOR_OFF) {
-      // Проверяем только пины, для которых включен мониторинг
-      if (pin.monitorMode == PIN_MONITOR_ON || pin.monitorMode == PIN_MONITOR_BUZZ) {
-        // Считываем состояние пина
-        int pinState = digitalRead(pin.pin);
-        
-        // Если состояние изменилось и активирован режим со звуком
-        if (pinState != pin.state && pin.monitorMode == PIN_MONITOR_BUZZ) {
-          // Подаем звуковой сигнал
-          if (pinState) {
-            M5.Speaker.tone(2000, 100); // Высокий звук для HIGH
-          } else {
-            M5.Speaker.tone(1000, 100); // Низкий звук для LOW
-          }
-        }
-        
-        // Обновляем состояние
-        pin.state = pinState;
-      }
-    }
-  }
-}
-
-// Переключение состояния пина
-void togglePin(int pinIndex) {
-  if (pinIndex >= 0 && pinIndex < kvmPins.size()) {
-    // Инвертируем состояние
-    kvmPins[pinIndex].state = !kvmPins[pinIndex].state;
-    
-    // Устанавливаем физический пин
-    digitalWrite(kvmPins[pinIndex].pin, kvmPins[pinIndex].state ? HIGH : LOW);
-    
-    // Сохраняем конфигурацию
-    saveConfiguration();
-  }
-}
-
 // Выполнение диагностики сети
 void performNetworkDiagnostics() {
   // Здесь можно добавить дополнительные проверки сети
@@ -1204,20 +1066,6 @@ void saveConfiguration() {
   apObj["hidden"] = apConfig.hidden;
   apObj["channel"] = apConfig.channel;
   
-  // Сохраняем настройки пинов
-  JsonArray pinsArray = doc.createNestedArray("pins");
-  for (const auto& pin : kvmPins) {
-    JsonObject pinObj = pinsArray.createNestedObject();
-    pinObj["pin"] = pin.pin;
-    pinObj["name"] = pin.name;
-    pinObj["state"] = pin.state;
-    pinObj["monitorMode"] = pin.monitorMode;
-  }
-  
-  // Сохраняем другие настройки
-  doc["connectionCheckInterval"] = connectionCheckInterval;
-  doc["useDHCP"] = useDHCP;
-  
   // Открываем файл для записи
   File configFile = LittleFS.open("/config.json", "w");
   if (!configFile) {
@@ -1227,6 +1075,12 @@ void saveConfiguration() {
   // Записываем JSON в файл
   serializeJson(doc, configFile);
   configFile.close();
+  
+  // Сохраняем настройки модулей
+  kvmModule.saveConfig(LittleFS);
+  honeypot.saveLogs(LittleFS);
+  networkTools.saveConfig(LittleFS);
+  irController.saveConfig(LittleFS);
 }
 
 // Загрузка конфигурации из LittleFS
@@ -1261,32 +1115,9 @@ void loadConfiguration() {
     apConfig.channel = apObj["channel"].as<int>();
   }
   
-  // Загружаем настройки пинов
-  kvmPins.clear();
-  if (doc.containsKey("pins")) {
-    JsonArray pinsArray = doc["pins"];
-    for (JsonObject pinObj : pinsArray) {
-      EnhancedPinConfig pin;
-      pin.pin = pinObj["pin"];
-      pin.name = pinObj["name"].as<String>();
-      pin.state = pinObj["state"];
-      pin.monitorMode = (PinMonitorMode)pinObj["monitorMode"].as<int>();
-      pin.lastStateChange = 0;
-      
-      kvmPins.push_back(pin);
-      
-      // Настраиваем пин
-      pinMode(pin.pin, OUTPUT);
-      digitalWrite(pin.pin, pin.state ? HIGH : LOW);
-    }
-  }
-  
-  // Загружаем другие настройки
-  if (doc.containsKey("connectionCheckInterval")) {
-    connectionCheckInterval = (ConnectionCheckInterval)doc["connectionCheckInterval"].as<int>();
-  }
-  
-  if (doc.containsKey("useDHCP")) {
-    useDHCP = doc["useDHCP"].as<bool>();
-  }
+  // Загружаем настройки модулей
+  kvmModule.loadConfig(LittleFS);
+  honeypot.loadLogs(LittleFS);
+  networkTools.loadConfig(LittleFS);
+  irController.loadConfig(LittleFS);
 }
