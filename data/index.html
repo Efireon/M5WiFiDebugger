@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>M5StickC WiFi Debug Tool</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #fff;
+            border-radius: 5px;
+            padding: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        h1, h2 {
+            color: #333;
+        }
+        .tab {
+            overflow: hidden;
+            border: 1px solid #ccc;
+            background-color: #f1f1f1;
+            border-radius: 5px 5px 0 0;
+        }
+        .tab button {
+            background-color: inherit;
+            float: left;
+            border: none;
+            outline: none;
+            cursor: pointer;
+            padding: 10px 16px;
+            transition: 0.3s;
+        }
+        .tab button:hover {
+            background-color: #ddd;
+        }
+        .tab button.active {
+            background-color: #ccc;
+        }
+        .tabcontent {
+            display: none;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-top: none;
+            border-radius: 0 0 5px 5px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        table, th, td {
+            border: 1px solid #ddd;
+        }
+        th, td {
+            padding: 10px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        .network-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="text"], input[type="password"], input[type="number"] {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        .status-connected {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status-disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .pin-card {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .pin-info {
+            flex-grow: 1;
+        }
+        .pin-state {
+            width: 60px;
+            text-align: center;
+        }
+        .toggle-btn {
+            width: 50px;
+            height: 25px;
+            position: relative;
+            display: inline-block;
+        }
+        .toggle-btn input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 25px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 17px;
+            width: 17px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #2196F3;
+        }
+        input:checked + .slider:before {
+            transform: translateX(25px);
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 2s linear infinite;
+            margin: 20px auto;
+            display: none;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>M5StickC WiFi Debug Tool</h1>
+        
+        <div class="tab">
+            <button class="tablinks active" onclick="openTab(event, 'status')">Статус</button>
+            <button class="tablinks" onclick="openTab(event, 'wifi')">Wi-Fi</button>
+            <button class="tablinks" onclick="openTab(event, 'kvm')">KVM</button>
+            <button class="tablinks" onclick="openTab(event, 'diagnostic')">Диагностика</button>
+        </div>
+        
+        <!-- Вкладка статуса -->
+        <div id="status" class="tabcontent" style="display: block;">
+            <h2>Текущий статус</h2>
+            
+            <div id="wifi-status" class="status status-disconnected">
+                Статус WiFi: Загрузка...
+            </div>
+            
+            <div id="device-info">
+                <p><strong>Устройство:</strong> M5StickC PLUS2</p>
+                <p><strong>Режим:</strong> <span id="operation-mode">Загрузка...</span></p>
+                <p><strong>IP-адрес:</strong> <span id="ip-address">-</span></p>
+                <p><strong>Уровень сигнала:</strong> <span id="signal-strength">-</span></p>
+            </div>
+            
+            <button onclick="refreshStatus()">Обновить статус</button>
+        </div>
+        
+        <!-- Вкладка Wi-Fi -->
+        <div id="wifi" class="tabcontent">
+            <h2>Управление Wi-Fi</h2>
+            
+            <div class="form-group">
+                <button onclick="scanNetworks()">Сканировать сети</button>
+                <div class="loader" id="scan-loader"></div>
+            </div>
+            
+            <div class="network-list">
+                <table id="networks-table">
+                    <thead>
+                        <tr>
+                            <th>SSID</th>
+                            <th>Сигнал</th>
+                            <th>Безопасность</th>
+                            <th>Канал</th>
+                            <th>Действие</th>
+                        </tr>
+                    </thead>
+                    <tbody id="networks-list">
+                        <tr>
+                            <td colspan="5">Нажмите "Сканировать сети" для поиска доступных WiFi сетей</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <h3>Подключение к сети</h3>
+            <form id="connect-form">
+                <div class="form-group">
+                    <label for="ssid">SSID:</label>
+                    <input type="text" id="ssid" name="ssid" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="password">Пароль:</label>
+                    <input type="password" id="password" name="password">
+                </div>
+                
+                <button type="submit">Подключиться</button>
+            </form>
+        </div>
+        
+        <!-- Вкладка KVM -->
+        <div id="kvm" class="tabcontent">
+            <h2>Управление KVM</h2>
+            
+            <div id="pins-list">
+                <!-- Список пинов будет загружен динамически -->
+                <p>Загрузка пинов...</p>
+            </div>
+            
+            <h3>Добавить новый пин</h3>
+            <form id="add-pin-form">
+                <div class="form-group">
+                    <label for="pin-number">Номер пина:</label>
+                    <input type="number" id="pin-number" name="pin" min="0" max="40" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="pin-name">Название:</label>
+                    <input type="text" id="pin-name" name="name" required>
+                </div>
+                
+                <button type="submit">Добавить пин</button>
+            </form>
+        </div>
+        
+        <!-- Вкладка диагностики -->
+        <div id="diagnostic" class="tabcontent">
+            <h2>Диагностика сети</h2>
+            
+            <button onclick="runDiagnostics()">Запустить диагностику</button>
+            <div class="loader" id="diagnostic-loader"></div>
+            
+            <div id="diagnostic-results">
+                <p>Нажмите "Запустить диагностику" для проверки сети</p>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Глобальные переменные
+        let currentMode = '';
+        
+        // Инициализация при загрузке страницы
+        document.addEventListener('DOMContentLoaded', function() {
+            refreshStatus();
+            loadKVMPins();
+            
+            // Настройка обработчиков форм
+            document.getElementById('connect-form').addEventListener('submit', function(e) {
+                e.preventDefault();
+                connectToNetwork();
+            });
+            
+            document.getElementById('add-pin-form').addEventListener('submit', function(e) {
+                e.preventDefault();
+                addNewPin();
+            });
+        });
+        
+        // Функция для открытия вкладки
+        function openTab(evt, tabName) {
+            var i, tabcontent, tablinks;
+            
+            // Скрываем все вкладки
+            tabcontent = document.getElementsByClassName("tabcontent");
+            for (i = 0; i < tabcontent.length; i++) {
+                tabcontent[i].style.display = "none";
+            }
+            
+            // Убираем активный класс у всех кнопок
+            tablinks = document.getElementsByClassName("tablinks");
+            for (i = 0; i < tablinks.length; i++) {
+                tablinks[i].className = tablinks[i].className.replace(" active", "");
+            }
+            
+            // Показываем выбранную вкладку и делаем кнопку активной
+            document.getElementById(tabName).style.display = "block";
+            evt.currentTarget.className += " active";
+            
+            // Обновляем данные на вкладках при переключении
+            if (tabName === 'status') {
+                refreshStatus();
+            } else if (tabName === 'kvm') {
+                loadKVMPins();
+            }
+        }
+        
+        // Функция для обновления статуса
+        function refreshStatus() {
+            fetch('/diagnostic')
+                .then(response => response.json())
+                .then(data => {
+                    // Обновляем информацию о статусе
+                    const wifiStatus = document.getElementById('wifi-status');
+                    const ipAddress = document.getElementById('ip-address');
+                    const signalStrength = document.getElementById('signal-strength');
+                    const operationMode = document.getElementById('operation-mode');
+                    
+                    if (data.connected) {
+                        wifiStatus.className = 'status status-connected';
+                        wifiStatus.innerHTML = `Подключено к сети: ${data.ssid}`;
+                        ipAddress.textContent = data.ip;
+                        signalStrength.textContent = `${data.rssi} dBm`;
+                        operationMode.textContent = 'Клиент';
+                        currentMode = 'client';
+                    } else {
+                        wifiStatus.className = 'status status-disconnected';
+                        wifiStatus.innerHTML = 'Не подключено к WiFi';
+                        ipAddress.textContent = '-';
+                        signalStrength.textContent = '-';
+                        
+                        // Проверяем, находимся ли мы в режиме точки доступа
+                        if (window.location.hostname === '192.168.4.1') {
+                            operationMode.textContent = 'Точка доступа';
+                            currentMode = 'ap';
+                        } else {
+                            operationMode.textContent = 'Неизвестно';
+                            currentMode = 'unknown';
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('Ошибка при обновлении статуса:', error);
+                });
+        }
+        
+        // Функция для сканирования сетей
+        function scanNetworks() {
+            // Показываем индикатор загрузки
+            const loader = document.getElementById('scan-loader');
+            loader.style.display = 'block';
+            
+            // Очищаем текущий список
+            const networksList = document.getElementById('networks-list');
+            networksList.innerHTML = '<tr><td colspan="5">Сканирование...</td></tr>';
+            
+            fetch('/scan')
+                .then(response => response.json())
+                .then(data => {
+                    // Скрываем индикатор загрузки
+                    loader.style.display = 'none';
+                    
+                    // Обновляем список сетей
+                    networksList.innerHTML = '';
+                    
+                    if (data.networks && data.networks.length > 0) {
+                        // Сортируем сети по уровню сигнала (от сильного к слабому)
+                        data.networks.sort((a, b) => b.rssi - a.rssi);
+                        
+                        data.networks.forEach(network => {
+                            const row = document.createElement('tr');
+                            
+                            // SSID
+                            const ssidCell = document.createElement('td');
+                            ssidCell.textContent = network.ssid || '(Скрытая сеть)';
+                            row.appendChild(ssidCell);
+                            
+                            // Сигнал
+                            const rssiCell = document.createElement('td');
+                            rssiCell.textContent = `${network.rssi} dBm`;
+                            row.appendChild(rssiCell);
+                            
+                            // Безопасность
+                            const securityCell = document.createElement('td');
+                            securityCell.textContent = network.encryption;
+                            row.appendChild(securityCell);
+                            
+                            // Канал
+                            const channelCell = document.createElement('td');
+                            channelCell.textContent = network.channel;
+                            row.appendChild(channelCell);
+                            
+                            // Кнопка подключения
+                            const actionCell = document.createElement('td');
+                            const connectBtn = document.createElement('button');
+                            connectBtn.textContent = 'Подключиться';
+                            connectBtn.addEventListener('click', function() {
+                                // Заполняем форму подключения данными выбранной сети
+                                document.getElementById('ssid').value = network.ssid;
+                                document.getElementById('password').focus();
+                            });
+                            actionCell.appendChild(connectBtn);
+                            row.appendChild(actionCell);
+                            
+                            networksList.appendChild(row);
+                        });
+                    } else {
+                        networksList.innerHTML = '<tr><td colspan="5">Сети не найдены</td></tr>';
+                    }
+                })
+                .catch(error => {
+                    // Скрываем индикатор загрузки
+                    loader.style.display = 'none';
+                    
+                    // Отображаем ошибку
+                    networksList.innerHTML = '<tr><td colspan="5">Ошибка при сканировании</td></tr>';
+                    console.error('Ошибка при сканировании сетей:', error);
+                });
+        }
+        
+        // Функция для подключения к сети
+        function connectToNetwork() {
+            const ssid = document.getElementById('ssid').value;
+            const password = document.getElementById('password').value;
+            
+            // Проверка SSID
+            if (!ssid) {
+                alert('Введите SSID сети');
+                return;
+            }
+            
+            // Формируем данные для отправки
+            const formData = new FormData();
+            formData.append('ssid', ssid);
+            formData.append('password', password);
+            
+            // Отправляем запрос
+            fetch('/connect', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.text())
+            .then(result => {
+                alert(result);
+                
+                // Если соединение успешно, обновляем статус через некоторое время
+                setTimeout(refreshStatus, 5000);
+            })
+            .catch(error => {
+                console.error('Ошибка при подключении к сети:', error);
+                alert('Ошибка при подключении к сети');
+            });
+        }
+        
+        // Функция для загрузки KVM пинов
+        function loadKVMPins() {
+            const pinsList = document.getElementById('pins-list');
+            pinsList.innerHTML = '<p>Загрузка пинов...</p>';
+            
+            fetch('/kvm')
+                .then(response => response.json())
+                .then(data => {
+                    pinsList.innerHTML = '';
+                    
+                    if (data.pins && data.pins.length > 0) {
+                        data.pins.forEach((pin, index) => {
+                            const pinCard = document.createElement('div');
+                            pinCard.className = 'pin-card';
+                            
+                            // Информация о пине
+                            const pinInfo = document.createElement('div');
+                            pinInfo.className = 'pin-info';
+                            pinInfo.innerHTML = `<strong>${pin.name}</strong><br>Пин #${pin.pin}`;
+                            pinCard.appendChild(pinInfo);
+                            
+                            // Состояние пина
+                            const pinState = document.createElement('div');
+                            pinState.className = 'pin-state';
+                            pinState.textContent = pin.state ? 'ВКЛ' : 'ВЫКЛ';
+                            pinCard.appendChild(pinState);
+                            
+                            // Переключатель
+                            const toggleContainer = document.createElement('div');
+                            toggleContainer.innerHTML = `
+                                <label class="toggle-btn">
+                                    <input type="checkbox" ${pin.state ? 'checked' : ''} onchange="togglePin(${index})">
+                                    <span class="slider"></span>
+                                </label>
+                            `;
+                            pinCard.appendChild(toggleContainer);
+                            
+                            pinsList.appendChild(pinCard);
+                        });
+                    } else {
+                        pinsList.innerHTML = '<p>Нет настроенных пинов. Добавьте новый пин ниже.</p>';
+                    }
+                })
+                .catch(error => {
+                    pinsList.innerHTML = '<p>Ошибка при загрузке пинов</p>';
+                    console.error('Ошибка при загрузке KVM пинов:', error);
+                });
+        }
+        
+        // Функция для переключения состояния пина
+        function togglePin(pinIndex) {
+            // Формируем данные для отправки
+            const formData = new FormData();
+            formData.append('pin', pinIndex);
+            
+            // Отправляем запрос
+            fetch('/kvm/toggle', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.text())
+            .then(result => {
+                // Обновляем список пинов
+                loadKVMPins();
+            })
+            .catch(error => {
+                console.error('Ошибка при переключении пина:', error);
+                alert('Ошибка при переключении пина');
+                // Обновляем список пинов для отображения текущего состояния
+                loadKVMPins();
+            });
+        }
+        
+        // Функция для добавления нового пина
+        function addNewPin() {
+            const pinNumber = document.getElementById('pin-number').value;
+            const pinName = document.getElementById('pin-name').value;
+            
+            // Проверки
+            if (!pinNumber) {
+                alert('Введите номер пина');
+                return;
+            }
+            
+            if (!pinName) {
+                alert('Введите название пина');
+                return;
+            }
+            
+            // Формируем данные для отправки
+            const formData = new FormData();
+            formData.append('pin', pinNumber);
+            formData.append('name', pinName);
+            
+            // Отправляем запрос
+            fetch('/kvm/add', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => {
+                if (!response.ok) {
+                    return response.text().then(text => { throw new Error(text) });
+                }
+                return response.text();
+            })
+            .then(result => {
+                alert(result);
+                
+                // Очищаем форму
+                document.getElementById('pin-number').value = '';
+                document.getElementById('pin-name').value = '';
+                
+                // Обновляем список пинов
+                loadKVMPins();
+            })
+            .catch(error => {
+                console.error('Ошибка при добавлении пина:', error);
+                alert('Ошибка: ' + error.message);
+            });
+        }
+        
+        // Функция для запуска диагностики
+        function runDiagnostics() {
+            // Показываем индикатор загрузки
+            const loader = document.getElementById('diagnostic-loader');
+            loader.style.display = 'block';
+            
+            // Очищаем текущие результаты
+            const diagnosticResults = document.getElementById('diagnostic-results');
+            diagnosticResults.innerHTML = '<p>Запуск диагностики...</p>';
+            
+            fetch('/diagnostic')
+                .then(response => response.json())
+                .then(data => {
+                    // Скрываем индикатор загрузки
+                    loader.style.display = 'none';
+                    
+                    // Формируем HTML с результатами
+                    let resultsHTML = '<h3>Результаты диагностики</h3>';
+                    
+                    if (data.connected) {
+                        resultsHTML += `
+                            <div class="status status-connected">
+                                <p>Устройство подключено к сети WiFi</p>
+                            </div>
+                            <table>
+                                <tr>
+                                    <th>Параметр</th>
+                                    <th>Значение</th>
+                                </tr>
+                                <tr>
+                                    <td>SSID</td>
+                                    <td>${data.ssid}</td>
+                                </tr>
+                                <tr>
+                                    <td>Уровень сигнала</td>
+                                    <td>${data.rssi} dBm</td>
+                                </tr>
+                                <tr>
+                                    <td>IP-адрес</td>
+                                    <td>${data.ip}</td>
+                                </tr>
+                                <tr>
+                                    <td>Шлюз</td>
+                                    <td>${data.gateway}</td>
+                                </tr>
+                                <tr>
+                                    <td>Маска подсети</td>
+                                    <td>${data.subnet}</td>
+                                </tr>
+                                <tr>
+                                    <td>DNS-сервер</td>
+                                    <td>${data.dns}</td>
+                                </tr>
+                            </table>
+                        `;
+                    } else {
+                        resultsHTML += `
+                            <div class="status status-disconnected">
+                                <p>Устройство не подключено к сети WiFi</p>
+                                <p>Для проведения диагностики необходимо подключиться к WiFi сети</p>
+                            </div>
+                        `;
+                    }
+                    
+                    diagnosticResults.innerHTML = resultsHTML;
+                })
+                .catch(error => {
+                    // Скрываем индикатор загрузки
+                    loader.style.display = 'none';
+                    
+                    // Отображаем ошибку
+                    diagnosticResults.innerHTML = '<p>Ошибка при проведении диагностики</p>';
+                    console.error('Ошибка при диагностике:', error);
+                });
+        }
+    </script>
+</body>
+</html>
