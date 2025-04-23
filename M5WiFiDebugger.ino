@@ -200,9 +200,9 @@ public:
           if (pin.monitorMode == PIN_MONITOR_BUZZ) {
             // Воспроизводим звуковой сигнал
             if (currentState) {
-              M5.Speaker.tone(2000, 100); // Высокий сигнал для HIGH
+              M5.Speaker.tone(8000, 200); // Высокий сигнал для HIGH
             } else {
-              M5.Speaker.tone(1000, 100); // Низкий сигнал для LOW
+              M5.Speaker.tone(1000, 200); // Низкий сигнал для LOW
             }
           }
         }
@@ -406,6 +406,9 @@ unsigned long buttonALastPress = 0;
 unsigned long buttonBLastPress = 0;
 bool buttonALongPress = false;
 bool buttonBLongPress = false;
+bool isScanningWifi = false;
+bool scanResultsReady = false;
+unsigned long lastScanTime = 0;
 
 // Прототипы функций
 void setupDisplay();
@@ -475,6 +478,7 @@ void loop() {
   // Обновляем наши модули
   kvmModule.update();
   deviceManager.update();
+  checkScanResults();
   
   // Отображаем актуальную информацию в зависимости от режима
   if (currentSection == MENU_KVM_MONITOR) {
@@ -601,40 +605,134 @@ void setupWebServer() {
   // Маршрут для корневой страницы
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     // Чтение HTML-файла из LittleFS
-    File file = LittleFS.open("/index.html", "r");
-    if (!file) {
-      // Если файл не найден, отправляем базовый HTML
-      request->send(200, "text/html", "<html><body><h1>M5Stick WiFi Debug Tool</h1>"
-                                        "<p>Configuration Interface</p>"
-                                        "<a href='/scan'>Scan Networks</a><br>"
-                                        "<a href='/kvm'>KVM Controls</a><br>"
-                                        "<a href='/ap'>AP Settings</a><br>"
-                                        "<a href='/network'>Network Tools</a><br>"
-                                        "<a href='/device'>Device Settings</a></body></html>");
-    } else {
+    if (LittleFS.exists("/index.html")) {
       request->send(LittleFS, "/index.html", "text/html");
+      Serial.println("Отправка index.html из LittleFS");
+    } else {
+      Serial.println("Файл index.html не найден в LittleFS!");
+      // Если файл не найден, отправляем сообщение об ошибке
+      request->send(200, "text/html", "<html><body><h1>Ошибка!</h1><p>Файл index.html не найден в файловой системе.</p><p>Загрузите веб-интерфейс через инструмент LittleFS Data Upload в Arduino IDE.</p></body></html>");
     }
   });
   
+  // Добавим маршрут для обслуживания других статических файлов из LittleFS
+  server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
+
+  // Остальные маршруты серверa без изменений...
+  
   // Маршрут для сканирования сетей
-  server.on("/scan", HTTP_GET, [](AsyncWebServerRequest *request){
-    scanWiFiNetworks();
+  server.on("/scan-start", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (isScanningWifi) {
+      request->send(429, "application/json", "{\"status\":\"scanning\",\"message\":\"Сканирование уже выполняется\"}");
+      return;
+    }
     
-    // Формирование JSON с результатами сканирования
-    DynamicJsonDocument doc(4096);
+    if (scanResultsReady) {
+      request->send(200, "application/json", "{\"status\":\"ready\",\"message\":\"Результаты сканирования уже доступны\"}");
+    } else {
+      startWiFiScanAsync();
+      request->send(202, "application/json", "{\"status\":\"started\",\"message\":\"Сканирование запущено\"}");
+    }
+  });
+  
+  // Маршрут для проверки статуса сканирования
+  server.on("/scan-status", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (isScanningWifi) {
+      request->send(200, "application/json", "{\"status\":\"scanning\",\"message\":\"Сканирование выполняется\"}");
+    } else if (scanResultsReady) {
+      request->send(200, "application/json", 
+                   "{\"status\":\"ready\",\"message\":\"Результаты сканирования доступны\",\"count\":" + 
+                   String(networks.size()) + "}");
+    } else {
+      request->send(200, "application/json", "{\"status\":\"idle\",\"message\":\"Сканирование не выполнялось\"}");
+    }
+  });
+  
+  // Маршрут для получения части результатов сканирования (с пагинацией)
+  server.on("/scan-results", HTTP_GET, [](AsyncWebServerRequest *request){
+    // Проверяем готовность результатов
+    if (!scanResultsReady) {
+      request->send(404, "application/json", "{\"error\":\"Результаты сканирования не доступны\"}");
+      return;
+    }
+    
+    // Получаем параметры пагинации
+    int page = 0;
+    int pageSize = 5;
+    
+    if (request->hasParam("page")) {
+      page = request->getParam("page")->value().toInt();
+    }
+    
+    if (request->hasParam("size")) {
+      pageSize = request->getParam("size")->value().toInt();
+      // Ограничиваем максимальный размер страницы
+      if (pageSize > 10) pageSize = 10;
+    }
+    
+    // Вычисляем начальный и конечный индексы
+    int startIndex = page * pageSize;
+    int endIndex = min(startIndex + pageSize, (int)networks.size());
+    
+    // Если начальный индекс за пределами массива
+    if (startIndex >= networks.size()) {
+      request->send(404, "application/json", "{\"error\":\"Страница не найдена\"}");
+      return;
+    }
+    
+    // Создаем документ JSON с меньшим размером буфера
+    DynamicJsonDocument doc(1024);
+    doc["page"] = page;
+    doc["pageSize"] = pageSize;
+    doc["totalNetworks"] = networks.size();
+    doc["totalPages"] = (networks.size() + pageSize - 1) / pageSize;
+    
     JsonArray networksArray = doc.createNestedArray("networks");
     
-    for (auto& network : networks) {
+    // Добавляем сети только для текущей страницы
+    for (int i = startIndex; i < endIndex; i++) {
+      const auto& network = networks[i];
       JsonObject netObj = networksArray.createNestedObject();
       netObj["ssid"] = network.ssid;
       netObj["rssi"] = network.rssi;
-      netObj["encryption"] = network.encryptionType == WIFI_AUTH_OPEN ? "Open" : "Encrypted";
+      
+      // Определяем тип шифрования
+      String encType;
+      switch (network.encryptionType) {
+        case WIFI_AUTH_OPEN: encType = "Open"; break;
+        case WIFI_AUTH_WEP: encType = "WEP"; break;
+        case WIFI_AUTH_WPA_PSK: encType = "WPA-PSK"; break;
+        case WIFI_AUTH_WPA2_PSK: encType = "WPA2-PSK"; break;
+        case WIFI_AUTH_WPA_WPA2_PSK: encType = "WPA/WPA2-PSK"; break;
+        case WIFI_AUTH_WPA2_ENTERPRISE: encType = "WPA2-Enterprise"; break;
+        default: encType = "Unknown";
+      }
+      netObj["encryption"] = encType;
       netObj["channel"] = network.channel;
     }
     
     String response;
     serializeJson(doc, response);
     request->send(200, "application/json", response);
+  });
+  
+  // Дополнительный маршрут для поддержки старого API (для совместимости)
+  server.on("/scan", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!scanResultsReady && !isScanningWifi) {
+      // Если сканирование еще не запущено, запускаем его
+      startWiFiScanAsync();
+      request->send(202, "application/json", "{\"status\":\"started\",\"message\":\"Сканирование запущено, запросите результаты позже через /scan-results\"}");
+      return;
+    }
+    
+    if (isScanningWifi) {
+      // Если сканирование в процессе
+      request->send(409, "application/json", "{\"status\":\"scanning\",\"message\":\"Сканирование выполняется, попробуйте позже\"}");
+      return;
+    }
+    
+    // Если результаты готовы, перенаправляем на первую страницу результатов
+    request->redirect("/scan-results?page=0&size=10");
   });
   
   // Маршрут для управления режимом AP
@@ -1090,9 +1188,9 @@ void playFindMeSound() {
   int toneVolume = map(deviceSettings.volume, 0, 100, 0, 255);
   for (int i = 0; i < 5; i++) {
     M5.Speaker.setVolume(toneVolume);
-    M5.Speaker.tone(2000, 200);
+    M5.Speaker.tone(2000, 300);
     delay(300);
-    M5.Speaker.tone(1500, 200);
+    M5.Speaker.tone(1500, 300);
     delay(300);
   }
   // Останавливаем звук
@@ -1791,6 +1889,157 @@ void handleMenuAction() {
   
   // Перерисовываем меню после действия
   drawMenu();
+}
+
+void startWiFiScanAsync() {
+  if (isScanningWifi) {
+    Serial.println("Сканирование уже выполняется, пропускаем");
+    return;
+  }
+  
+  // Очищаем предыдущие результаты
+  networks.clear();
+  scanResultsReady = false;
+  isScanningWifi = true;
+  
+  Serial.println("Запуск асинхронного сканирования WiFi...");
+  WiFi.scanNetworks(true); // Асинхронное сканирование
+  lastScanTime = millis();
+}
+
+void checkScanResults() {
+  if (!isScanningWifi || scanResultsReady) {
+    return; // Сканирование не запущено или результаты уже обработаны
+  }
+  
+  int scanStatus = WiFi.scanComplete();
+  
+  // Таймаут сканирования (15 секунд)
+  if (scanStatus == WIFI_SCAN_RUNNING && (millis() - lastScanTime > 15000)) {
+    Serial.println("Таймаут сканирования WiFi");
+    WiFi.scanDelete();
+    isScanningWifi = false;
+    return;
+  }
+  
+  // Сканирование завершено
+  if (scanStatus >= 0) {
+    Serial.printf("Сканирование завершено, найдено %d сетей\n", scanStatus);
+    
+    // Ограничиваем количество сетей для предотвращения проблем с памятью
+    int networksToProcess = min(scanStatus, 30);
+    
+    for (int i = 0; i < networksToProcess; i++) {
+      // Даем возможность процессору обработать фоновые задачи
+      if (i % 3 == 0) yield();
+      
+      WiFiResult network;
+      network.ssid = WiFi.SSID(i);
+      network.rssi = WiFi.RSSI(i);
+      network.encryptionType = WiFi.encryptionType(i);
+      network.channel = WiFi.channel(i);
+      networks.push_back(network);
+    }
+    
+    // Освобождаем память, выделенную для результатов сканирования
+    WiFi.scanDelete();
+    
+    // Сортируем по уровню сигнала, если у нас есть сети
+    if (!networks.empty()) {
+      std::sort(networks.begin(), networks.end(), [](const WiFiResult& a, const WiFiResult& b) {
+        return a.rssi > b.rssi;
+      });
+    }
+    
+    scanResultsReady = true;
+    isScanningWifi = false;
+    Serial.println("Результаты сканирования обработаны и готовы");
+  }
+}
+
+bool scanWiFiNetworksForWeb() {
+  // Проверяем, не выполняется ли уже сканирование
+  if (isScanningWifi) {
+    Serial.println("Сканирование WiFi уже выполняется, пропускаем");
+    return false;
+  }
+  
+  isScanningWifi = true;
+  Serial.println("Начинаем сканирование WiFi сетей...");
+  
+  // Очищаем предыдущие результаты
+  networks.clear();
+  
+  // Запускаем сканирование с таймаутом
+  int scanCount = WiFi.scanNetworks(false, true, false, 300);  // false=не блокировать, true=показывать скрытые, 300ms на канал
+  
+  if (scanCount == WIFI_SCAN_RUNNING) {
+    Serial.println("Сканирование запущено асинхронно");
+    // Даем немного времени для начала сканирования, чтобы не перегружать CPU
+    delay(100);
+    
+    // Ждем результата сканирования с таймаутом
+    unsigned long startTime = millis();
+    int numNetworks = WIFI_SCAN_RUNNING;
+    
+    while (numNetworks == WIFI_SCAN_RUNNING && (millis() - startTime < 10000)) {
+      delay(100);  // Небольшая задержка между проверками
+      numNetworks = WiFi.scanComplete();
+      yield();  // Позволяет обработать фоновые задачи, чтобы избежать срабатывания WDT
+    }
+    
+    scanCount = numNetworks;
+  }
+  
+  // Проверяем результат сканирования
+  if (scanCount < 0) {
+    Serial.println("Ошибка сканирования WiFi: " + String(scanCount));
+    isScanningWifi = false;
+    return false;
+  }
+  
+  Serial.print("Найдено сетей: ");
+  Serial.println(scanCount);
+  
+  // Ограничиваем количество сетей для предотвращения проблем с памятью
+  const int MAX_NETWORKS = 20;
+  int networksToProcess = min(scanCount, MAX_NETWORKS);
+  
+  // Сохраняем результаты сканирования
+  for (int i = 0; i < networksToProcess; i++) {
+    // Даем возможность процессору обработать фоновые задачи
+    if (i % 5 == 0) {
+      yield();
+    }
+    
+    WiFiResult network;
+    network.ssid = WiFi.SSID(i);
+    network.rssi = WiFi.RSSI(i);
+    network.encryptionType = WiFi.encryptionType(i);
+    network.channel = WiFi.channel(i);
+    networks.push_back(network);
+    
+    Serial.print(i + 1);
+    Serial.print(": ");
+    Serial.print(network.ssid);
+    Serial.print(" (");
+    Serial.print(network.rssi);
+    Serial.println(" dBm)");
+  }
+  
+  // Освобождаем память, выделенную для результатов сканирования
+  WiFi.scanDelete();
+  
+  // Сортируем по уровню сигнала, если у нас есть сети
+  if (!networks.empty()) {
+    std::sort(networks.begin(), networks.end(), [](const WiFiResult& a, const WiFiResult& b) {
+      return a.rssi > b.rssi;
+    });
+  }
+  
+  Serial.println("Сканирование WiFi завершено");
+  isScanningWifi = false;
+  return true;
 }
 
 // Сканирование WiFi сетей

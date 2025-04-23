@@ -95,9 +95,9 @@ KVMModule::KVMModule(AsyncWebServer* server) :
   checkInterval(CHECK_OFF), 
   useDHCP(true), 
   lastConnectionCheck(0),
-  highToneFrequency(2000),
-  lowToneFrequency(1000),
-  toneDuration(100) {
+  highToneFrequency(6000),
+  lowToneFrequency(2000),
+  toneDuration(200) {
 }
 
 void KVMModule::begin() {
