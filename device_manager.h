@@ -4,6 +4,7 @@
 #include <M5StickCPlus2.h>
 #include <vector>
 #include <WiFi.h>
+#include "common_structures.h"
 
 // Структура для хранения данных датчиков
 struct SensorData {
@@ -57,20 +58,30 @@ private:
       // Проверяем, не истекло ли время активности сигнала
       if (elapsedTime > findMeDuration) {
         findMeActive = false;
-        M5.Speaker.tone(0); // Выключаем звук
+        M5.Speaker.stop(); // Выключаем звук
       } else {
         // Чередуем сигналы с интервалом 300 мс
         unsigned long beepCycle = (elapsedTime / 300) % 4;
         
         if (beepCycle == 0) {
-          M5.Speaker.tone(2000);
+          playTone(2000, 200);
         } else if (beepCycle == 2) {
-          M5.Speaker.tone(1500);
+          playTone(1500, 200);
         } else {
-          M5.Speaker.tone(0); // Пауза между сигналами
+          M5.Speaker.stop(); // Пауза между сигналами
         }
       }
     }
+  }
+  
+  // Воспроизведение тона с учетом настроек громкости
+  void playTone(int frequency, int duration) {
+    // Получаем настройки громкости
+    uint8_t targetVolume = map(globalDeviceSettings.volume, 0, 100, 0, 255);
+    M5.Speaker.setVolume(targetVolume);
+    
+    // Воспроизводим звук
+    M5.Speaker.tone(frequency, duration);
   }
 
 public:
@@ -148,10 +159,6 @@ public:
         sensorData.gyroX = imuData.gyro.x;
         sensorData.gyroY = imuData.gyro.y;
         sensorData.gyroZ = imuData.gyro.z;
-        
-        // Получаем температуру другим способом, т.к. в структуре imu_data_t нет поля temperature
-        // Оставляем предыдущее значение, т.к. прямого метода получения температуры нет
-        // Или использовать другой способ получения температуры если доступен
     }
     
     // Устанавливаем временную метку
@@ -184,12 +191,15 @@ public:
     findMeActive = true;
     findMeStartTime = millis();
     findMeDuration = duration;
+    
+    // Воспроизводим первый сигнал сразу
+    playTone(2000, 200);
   }
   
   // Деактивация сигнала Find Me
   void deactivateFindMe() {
     findMeActive = false;
-    M5.Speaker.tone(0); // Выключаем звук
+    M5.Speaker.stop(); // Выключаем звук
   }
   
   // Получение текущих данных сенсоров

@@ -7,6 +7,7 @@
 #include <LittleFS.h>
 #include <vector>
 
+#include "common_structures.h"
 #include "honeypot.h"
 #include "network_tools.h"
 #include "device_manager.h"
@@ -19,74 +20,15 @@ enum MenuSection {
   MENU_KVM_OPTIONS,// Опции KVM
   MENU_KVM_MONITOR,// Мониторинг KVM
   MENU_IR_CONTROL, // ИК-управление (заглушка)
-  MENU_DEVICE_SETTINGS // Настройки устройства
+  MENU_DEVICE_SETTINGS, // Настройки устройства
+  MENU_WIFI_SAVED, // Сохраненные сети WiFi
+  MENU_AP_MODE_SELECT // Выбор режима AP
 };
 
 // Структура для пунктов меню
 struct MenuItem {
   const char* title;
   MenuSection section;
-};
-
-// Определение режимов точки доступа
-enum APMode {
-  AP_MODE_OFF,      // Выключена
-  AP_MODE_NORMAL,   // Обычный режим
-  AP_MODE_REPEATER, // Режим ретранслятора
-  AP_MODE_HIDDEN,   // Скрытый режим
-  AP_MODE_HONEYPOT  // Режим ловушки
-};
-
-// Режимы мониторинга пинов
-enum PinMonitorMode {
-  PIN_MONITOR_OFF,  // Выключен
-  PIN_MONITOR_ON,   // Включен
-  PIN_MONITOR_BUZZ  // Со звуком
-};
-
-// Интервалы проверки соединения
-enum ConnectionCheckInterval {
-  CHECK_OFF,    // Выключено
-  CHECK_10SEC,  // 10 секунд
-  CHECK_30SEC,  // 30 секунд
-  CHECK_1MIN,   // 1 минута
-  CHECK_5MIN,   // 5 минут
-  CHECK_30MIN   // 30 минут
-};
-
-// Структура для хранения результатов сканирования WiFi
-struct WiFiResult {
-  String ssid;
-  int32_t rssi;
-  uint8_t encryptionType;
-  int32_t channel;
-};
-
-// Расширенная структура для пинов
-struct EnhancedPinConfig {
-  int pin;
-  String name;
-  bool state;
-  PinMonitorMode monitorMode;
-  unsigned long lastStateChange;
-};
-
-// Расширенная конфигурация для AP режима
-struct APConfig {
-  APMode mode;
-  String ssid;
-  String password;
-  bool hidden;
-  int channel;
-};
-
-// Структура настроек устройства
-struct DeviceSettings {
-  uint8_t brightness;       // Яркость экрана (0-100%)
-  uint16_t sleepTimeout;    // Время до перехода в спящий режим (в секундах, 0 - отключено)
-  String deviceId;          // Идентификатор устройства
-  bool rotateDisplay;       // Поворот экрана
-  uint8_t volume;           // Громкость (0-100%)
 };
 
 // Класс для управления KVM пинами
@@ -127,7 +69,7 @@ public:
     
     // Настраиваем пин
     pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW);
+    digitalWrite(pin, globalDeviceSettings.invertPins ? HIGH : LOW);
     
     // Сохраняем конфигурацию
     saveConfig();
@@ -139,9 +81,31 @@ public:
   void togglePin(int index) {
     if (index >= 0 && index < pins.size()) {
       pins[index].state = !pins[index].state;
-      digitalWrite(pins[index].pin, pins[index].state ? HIGH : LOW);
+      digitalWrite(pins[index].pin, (pins[index].state ^ globalDeviceSettings.invertPins) ? HIGH : LOW);
       pins[index].lastStateChange = millis();
       saveConfig();
+    }
+  }
+  
+  // Установка состояния пина
+  void setPin(int index, bool state) {
+    if (index >= 0 && index < pins.size()) {
+      pins[index].state = state;
+      digitalWrite(pins[index].pin, (state ^ globalDeviceSettings.invertPins) ? HIGH : LOW);
+      pins[index].lastStateChange = millis();
+      saveConfig();
+    }
+  }
+  
+  // Отправка импульса на пин
+  void pulsePin(int index, int duration) {
+    if (index >= 0 && index < pins.size()) {
+      bool originalState = pins[index].state;
+      // Инвертируем состояние
+      setPin(index, !originalState);
+      delay(duration);
+      // Возвращаем обратно
+      setPin(index, originalState);
     }
   }
   
@@ -236,12 +200,7 @@ public:
     if (WiFi.status() == WL_CONNECTED) {
       // Измеряем силу сигнала
       int rssi = WiFi.RSSI();
-      
       // Выводим информацию о соединении, если нужно
-      // ...
-    } else {
-      // Соединение отсутствует
-      // ...
     }
   }
   
@@ -332,7 +291,7 @@ public:
         
         // Настраиваем пин
         pinMode(pin.pin, OUTPUT);
-        digitalWrite(pin.pin, pin.state ? HIGH : LOW);
+        digitalWrite(pin.pin, (pin.state ^ globalDeviceSettings.invertPins) ? HIGH : LOW);
       }
     }
     
@@ -347,6 +306,22 @@ public:
   }
 };
 
+// Предопределенные пины для M5StickC Plus2
+const struct {
+  int pin;
+  const char* name;
+  const char* description;
+} AVAILABLE_PINS[] = {
+  {0,  "GPIO0",  "GROVE"},
+  {25, "GPIO25", "GROVE"},
+  {26, "GPIO26", "GROVE"},
+  {32, "GPIO32", "GROVE"},
+  {33, "GPIO33", "GROVE"},
+  {36, "GPIO36", "GROVE (Input only)"},
+  // Добавьте другие пины по спецификации
+};
+#define AVAILABLE_PINS_COUNT (sizeof(AVAILABLE_PINS) / sizeof(AVAILABLE_PINS[0]))
+
 // Глобальные переменные
 MenuSection currentSection = MENU_MAIN;  // Текущий раздел меню
 int selectedMenuItem = 0;                // Выбранный пункт меню
@@ -354,8 +329,9 @@ int menuStartPosition = 0;               // Начальная позиция д
 AsyncWebServer server(80);               // Веб-сервер на порту 80
 WiFiManager wifiManager;                 // Менеджер WiFi
 APConfig apConfig = {AP_MODE_OFF, "M5StickDebug", "12345678", false, 1}; // Конфигурация AP
-DeviceSettings deviceSettings = {80, 300, "M5WifiDebugger", false, 70}; // Настройки устройства по умолчанию
-
+DeviceSettings deviceSettings = {80, 300, "M5WifiDebugger", false, 70, false}; // Настройки устройства по умолчанию
+DeviceSettings globalDeviceSettings; // Глобальная переменная для других модулей (определена здесь)
+std::vector<SavedNetwork> savedNetworks; // Сохраненные сети
 std::vector<WiFiResult> networks;        // Список найденных сетей
 
 // Наши модули
@@ -368,6 +344,7 @@ Honeypot honeypot;
 const MenuItem mainMenuItems[] = {
   {"AP Options", MENU_AP_OPTIONS},
   {"WiFi Scan & Debug", MENU_WIFI_SCAN},
+  {"Saved Networks", MENU_WIFI_SAVED},
   {"KVM Options", MENU_KVM_OPTIONS},
   {"KVM Monitor", MENU_KVM_MONITOR},
   {"IR Control", MENU_IR_CONTROL},
@@ -377,15 +354,22 @@ const MenuItem mainMenuItems[] = {
 
 // Пункты подменю AP Options
 const char* apOptionsItems[] = {
-  "AP Mode: Off",
-  "AP Mode: Normal",
-  "AP Mode: Repeater",
-  "AP Mode: Hidden",
-  "AP Mode: Honeypot",
+  "AP Mode",
   "SSID & Password",
   "Back to Main Menu"
 };
 #define AP_OPTIONS_ITEMS_COUNT (sizeof(apOptionsItems) / sizeof(char*))
+
+// Пункты подменю режимов AP
+const char* apModeItems[] = {
+  "Off",
+  "Normal",
+  "Repeater",
+  "Hidden",
+  "Honeypot",
+  "Back"
+};
+#define AP_MODE_ITEMS_COUNT (sizeof(apModeItems) / sizeof(char*))
 
 // Пункты подменю Device Settings
 const char* deviceSettingsItems[] = {
@@ -394,6 +378,7 @@ const char* deviceSettingsItems[] = {
   "Device ID",
   "Display Rotation",
   "Volume",
+  "Invert KVM Pins",
   "Back to Main Menu"
 };
 #define DEVICE_SETTINGS_ITEMS_COUNT (sizeof(deviceSettingsItems) / sizeof(char*))
@@ -404,8 +389,10 @@ char displayBuffer[128];
 // Переменные для обработки кнопок
 unsigned long buttonALastPress = 0;
 unsigned long buttonBLastPress = 0;
+unsigned long buttonCLastPress = 0;
 bool buttonALongPress = false;
 bool buttonBLongPress = false;
+bool buttonCLongPress = false;
 bool isScanningWifi = false;
 bool scanResultsReady = false;
 unsigned long lastScanTime = 0;
@@ -426,12 +413,14 @@ void saveDeviceSettings();
 void loadDeviceSettings();
 void playFindMeSound();
 int getMaxMenuItems();
+void saveSavedNetworks();
+void loadSavedNetworks();
+void connectToSavedNetwork(int index);
 
 // Функция инициализации
 void setup() {
   // Инициализация M5StickCPlus2
   M5.begin();
-  M5.Lcd.setRotation(3);  // Горизонтальная ориентация
   
   // Инициализация файловой системы
   if (!LittleFS.begin(true)) {
@@ -441,9 +430,15 @@ void setup() {
   // Загрузка конфигурации
   loadConfiguration();
   loadDeviceSettings();
+  loadSavedNetworks();
+  
+  // Инициализируем глобальные настройки
+  globalDeviceSettings = deviceSettings;
   
   // Применяем настройки устройства
   M5.Lcd.setBrightness(deviceSettings.brightness);
+  M5.Lcd.setRotation(deviceSettings.rotateDisplay ? 1 : 3);
+  globalDeviceSettings = deviceSettings; // Синхронизируем глобальные настройки
   
   // Инициализируем наши модули
   kvmModule.begin();
@@ -458,19 +453,21 @@ void setup() {
   // Настройка веб-сервера
   setupWebServer();
   
-  // Вывод информации о запуске
-  M5.Lcd.fillScreen(BLACK);
-  M5.Lcd.setCursor(0, 0);
-  M5.Lcd.setTextSize(1);
-  M5.Lcd.println("M5Stick WiFi Debug Tool");
-  M5.Lcd.println("----------------------");
-
   // Отображаем главное меню
   drawMenu();
 }
 
 // Основной цикл
 void loop() {
+  static unsigned long lastCheck = 0;
+  
+  // Проверяем состояние каждые 5 секунд
+  if (millis() - lastCheck > 5000) {
+    lastCheck = millis();
+    Serial.printf("WiFi mode: %d, Free heap: %d bytes\n", 
+                  WiFi.getMode(), ESP.getFreeHeap());
+  }
+  
   // Обновление состояния кнопок
   M5.update();
   handleButtons();
@@ -478,17 +475,15 @@ void loop() {
   // Обновляем наши модули
   kvmModule.update();
   deviceManager.update();
-  checkScanResults();
   
-  // Отображаем актуальную информацию в зависимости от режима
+  // Обновляем информацию на экране в режиме мониторинга
   if (currentSection == MENU_KVM_MONITOR) {
-    // Периодически обновляем информацию на экране
     static unsigned long lastUpdateTime = 0;
     unsigned long currentTime = millis();
     
     if (currentTime - lastUpdateTime > 1000) { // Обновляем раз в секунду
       lastUpdateTime = currentTime;
-      drawMenu(); // Перерисовываем меню с актуальной информацией
+      drawMenu();
     }
   }
   
@@ -498,7 +493,6 @@ void loop() {
 
 // Настройка экрана
 void setupDisplay() {
-  M5.Lcd.setRotation(deviceSettings.rotateDisplay ? 1 : 3);  // Ориентация в зависимости от настроек
   M5.Lcd.fillScreen(BLACK);
   M5.Lcd.setTextSize(1);
   M5.Lcd.setTextColor(WHITE);
@@ -507,47 +501,48 @@ void setupDisplay() {
 
 // Настройка WiFi
 void setupWiFi() {
-  // Настройка параметров WiFiManager
-  wifiManager.setAPCallback([](WiFiManager* mgr) {
-    M5.Lcd.fillScreen(BLACK);
-    M5.Lcd.setCursor(0, 0);
-    M5.Lcd.println("Configuration Mode");
-    M5.Lcd.println("Connect to WiFi:");
-    M5.Lcd.println(mgr->getConfigPortalSSID());
-    M5.Lcd.println("Visit: 192.168.4.1");
-  });
+  // Убедимся, что WiFi в правильном режиме
+  WiFi.mode(WIFI_MODE_STA);
+  
+  // Проверяем сохраненные сети
+  if (savedNetworks.size() > 0) {
+    // Пробуем подключиться к последней сохраненной сети
+    connectToSavedNetwork(0);
+  }
   
   // Проверка сохраненных настроек и режима AP
   if (apConfig.mode != AP_MODE_OFF) {
+    // Переключаемся в режим AP
+    WiFi.mode(WIFI_MODE_AP);
     // Если активирован режим AP, запускаем точку доступа
     updateAccessPointMode();
-  } else {
-    // Пытаемся подключиться к Wi-Fi, если есть сохраненные настройки
-    String savedSSID = WiFi.SSID();
-    String savedPass = WiFi.psk();
+  }
+}
+
+// Функция подключения к сохраненной сети
+void connectToSavedNetwork(int index) {
+  if (index >= 0 && index < savedNetworks.size()) {
+    WiFi.begin(savedNetworks[index].ssid.c_str(), savedNetworks[index].password.c_str());
     
-    if (savedSSID.length() > 0) {
-      WiFi.begin(savedSSID.c_str(), savedPass.c_str());
-      
-      // Ожидание подключения с таймаутом
-      int timeout = 0;
-      while (WiFi.status() != WL_CONNECTED && timeout < 20) {
-        delay(500);
-        M5.Lcd.print(".");
-        timeout++;
-      }
-      
-      if (WiFi.status() == WL_CONNECTED) {
-        M5.Lcd.println("\nConnected!");
-      } else {
-        // Если не удалось подключиться, запускаем режим точки доступа
-        apConfig.mode = AP_MODE_NORMAL;
-        updateAccessPointMode();
-      }
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.print("Connecting to ");
+    M5.Lcd.println(savedNetworks[index].ssid);
+    
+    // Ожидание подключения с таймаутом
+    int timeout = 0;
+    while (WiFi.status() != WL_CONNECTED && timeout < 20) {
+      delay(500);
+      M5.Lcd.print(".");
+      timeout++;
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      M5.Lcd.println("\nConnected!");
+      delay(1000);
     } else {
-      // Если нет сохраненных настроек, запускаем режим точки доступа
-      apConfig.mode = AP_MODE_NORMAL;
-      updateAccessPointMode();
+      M5.Lcd.println("\nConnection failed!");
+      delay(2000);
     }
   }
 }
@@ -602,63 +597,99 @@ void updateAccessPointMode() {
 
 // Настройка веб-сервера
 void setupWebServer() {
-  // Маршрут для корневой страницы
+  // Проверяем, что WiFi инициализирован
+  if (WiFi.getMode() == WIFI_MODE_NULL) {
+    Serial.println("WiFi not initialized, forcing STA mode");
+    WiFi.mode(WIFI_MODE_STA);
+    delay(100);
+  }
+  
+  // Основная страница
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    // Чтение HTML-файла из LittleFS
+    Serial.println("Root page requested");
+    
     if (LittleFS.exists("/index.html")) {
-      request->send(LittleFS, "/index.html", "text/html");
-      Serial.println("Отправка index.html из LittleFS");
+      Serial.println("index.html found");
+      
+      // Проверяем размер файла
+      File file = LittleFS.open("/index.html", "r");
+      if (!file) {
+        Serial.println("Failed to open index.html");
+        request->send(500, "text/plain", "Failed to open file");
+        return;
+      }
+      
+      size_t fileSize = file.size();
+      Serial.printf("File size: %d bytes\n", fileSize);
+      file.close();
+      
+      // Если файл слишком большой, отправляем по частям
+      if (fileSize > 20000) {
+        request->send(LittleFS, "/index.html", "text/html", false);
+      } else {
+        request->send(LittleFS, "/index.html", "text/html");
+      }
     } else {
-      Serial.println("Файл index.html не найден в LittleFS!");
-      // Если файл не найден, отправляем сообщение об ошибке
-      request->send(200, "text/html", "<html><body><h1>Ошибка!</h1><p>Файл index.html не найден в файловой системе.</p><p>Загрузите веб-интерфейс через инструмент LittleFS Data Upload в Arduino IDE.</p></body></html>");
+      Serial.println("index.html not found");
+      request->send(200, "text/html", "<html><body><h1>File not found</h1><p>Upload the web interface files to LittleFS</p></body></html>");
     }
   });
   
-  // Добавим маршрут для обслуживания других статических файлов из LittleFS
+  // Обслуживание статических файлов
   server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
-
-  // Остальные маршруты серверa без изменений...
   
   // Маршрут для сканирования сетей
   server.on("/scan-start", HTTP_GET, [](AsyncWebServerRequest *request){
     if (isScanningWifi) {
-      request->send(429, "application/json", "{\"status\":\"scanning\",\"message\":\"Сканирование уже выполняется\"}");
+      request->send(429, "application/json", "{\"status\":\"scanning\",\"message\":\"Scanning already in progress\"}");
       return;
     }
     
-    if (scanResultsReady) {
-      request->send(200, "application/json", "{\"status\":\"ready\",\"message\":\"Результаты сканирования уже доступны\"}");
-    } else {
-      startWiFiScanAsync();
-      request->send(202, "application/json", "{\"status\":\"started\",\"message\":\"Сканирование запущено\"}");
-    }
+    isScanningWifi = true;
+    scanResultsReady = false;
+    WiFi.scanNetworks(true); // Асинхронное сканирование
+    request->send(202, "application/json", "{\"status\":\"started\",\"message\":\"Scan started\"}");
   });
   
   // Маршрут для проверки статуса сканирования
   server.on("/scan-status", HTTP_GET, [](AsyncWebServerRequest *request){
     if (isScanningWifi) {
-      request->send(200, "application/json", "{\"status\":\"scanning\",\"message\":\"Сканирование выполняется\"}");
+      int scanResult = WiFi.scanComplete();
+      if (scanResult >= 0) {
+        networks.clear();
+        for (int i = 0; i < scanResult; i++) {
+          WiFiResult network;
+          network.ssid = WiFi.SSID(i);
+          network.rssi = WiFi.RSSI(i);
+          network.encryptionType = WiFi.encryptionType(i);
+          network.channel = WiFi.channel(i);
+          networks.push_back(network);
+        }
+        WiFi.scanDelete();
+        isScanningWifi = false;
+        scanResultsReady = true;
+        request->send(200, "application/json", 
+                     "{\"status\":\"ready\",\"message\":\"Scan complete\",\"count\":" + String(networks.size()) + "}");
+      } else {
+        request->send(200, "application/json", "{\"status\":\"scanning\",\"message\":\"Scanning in progress\"}");
+      }
     } else if (scanResultsReady) {
       request->send(200, "application/json", 
-                   "{\"status\":\"ready\",\"message\":\"Результаты сканирования доступны\",\"count\":" + 
-                   String(networks.size()) + "}");
+                   "{\"status\":\"ready\",\"message\":\"Results available\",\"count\":" + String(networks.size()) + "}");
     } else {
-      request->send(200, "application/json", "{\"status\":\"idle\",\"message\":\"Сканирование не выполнялось\"}");
+      request->send(200, "application/json", "{\"status\":\"idle\",\"message\":\"No scan performed\"}");
     }
   });
   
-  // Маршрут для получения части результатов сканирования (с пагинацией)
+  // Маршрут для получения результатов сканирования
   server.on("/scan-results", HTTP_GET, [](AsyncWebServerRequest *request){
-    // Проверяем готовность результатов
     if (!scanResultsReady) {
-      request->send(404, "application/json", "{\"error\":\"Результаты сканирования не доступны\"}");
+      request->send(404, "application/json", "{\"error\":\"No scan results available\"}");
       return;
     }
     
-    // Получаем параметры пагинации
     int page = 0;
-    int pageSize = 5;
+    int pageSize = 10;
     
     if (request->hasParam("page")) {
       page = request->getParam("page")->value().toInt();
@@ -666,22 +697,13 @@ void setupWebServer() {
     
     if (request->hasParam("size")) {
       pageSize = request->getParam("size")->value().toInt();
-      // Ограничиваем максимальный размер страницы
-      if (pageSize > 10) pageSize = 10;
+      if (pageSize > 20) pageSize = 20;
     }
     
-    // Вычисляем начальный и конечный индексы
     int startIndex = page * pageSize;
     int endIndex = min(startIndex + pageSize, (int)networks.size());
     
-    // Если начальный индекс за пределами массива
-    if (startIndex >= networks.size()) {
-      request->send(404, "application/json", "{\"error\":\"Страница не найдена\"}");
-      return;
-    }
-    
-    // Создаем документ JSON с меньшим размером буфера
-    DynamicJsonDocument doc(1024);
+    DynamicJsonDocument doc(2048);
     doc["page"] = page;
     doc["pageSize"] = pageSize;
     doc["totalNetworks"] = networks.size();
@@ -689,26 +711,22 @@ void setupWebServer() {
     
     JsonArray networksArray = doc.createNestedArray("networks");
     
-    // Добавляем сети только для текущей страницы
     for (int i = startIndex; i < endIndex; i++) {
-      const auto& network = networks[i];
       JsonObject netObj = networksArray.createNestedObject();
-      netObj["ssid"] = network.ssid;
-      netObj["rssi"] = network.rssi;
+      netObj["ssid"] = networks[i].ssid;
+      netObj["rssi"] = networks[i].rssi;
       
-      // Определяем тип шифрования
       String encType;
-      switch (network.encryptionType) {
+      switch (networks[i].encryptionType) {
         case WIFI_AUTH_OPEN: encType = "Open"; break;
         case WIFI_AUTH_WEP: encType = "WEP"; break;
         case WIFI_AUTH_WPA_PSK: encType = "WPA-PSK"; break;
         case WIFI_AUTH_WPA2_PSK: encType = "WPA2-PSK"; break;
         case WIFI_AUTH_WPA_WPA2_PSK: encType = "WPA/WPA2-PSK"; break;
-        case WIFI_AUTH_WPA2_ENTERPRISE: encType = "WPA2-Enterprise"; break;
         default: encType = "Unknown";
       }
       netObj["encryption"] = encType;
-      netObj["channel"] = network.channel;
+      netObj["channel"] = networks[i].channel;
     }
     
     String response;
@@ -716,23 +734,62 @@ void setupWebServer() {
     request->send(200, "application/json", response);
   });
   
-  // Дополнительный маршрут для поддержки старого API (для совместимости)
-  server.on("/scan", HTTP_GET, [](AsyncWebServerRequest *request){
-    if (!scanResultsReady && !isScanningWifi) {
-      // Если сканирование еще не запущено, запускаем его
-      startWiFiScanAsync();
-      request->send(202, "application/json", "{\"status\":\"started\",\"message\":\"Сканирование запущено, запросите результаты позже через /scan-results\"}");
+  // Маршрут для получения сохраненных сетей
+  server.on("/wifi/saved", HTTP_GET, [](AsyncWebServerRequest *request){
+    DynamicJsonDocument doc(2048);
+    JsonArray networksArray = doc.createNestedArray("networks");
+    
+    for (const auto& network : savedNetworks) {
+      JsonObject netObj = networksArray.createNestedObject();
+      netObj["ssid"] = network.ssid;
+    }
+    
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+  
+  // Маршрут для подключения к сохраненной сети
+  server.on("/wifi/connect", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("ssid", true)) {
+      request->send(400, "application/json", "{\"error\":\"Missing SSID parameter\"}");
       return;
     }
     
-    if (isScanningWifi) {
-      // Если сканирование в процессе
-      request->send(409, "application/json", "{\"status\":\"scanning\",\"message\":\"Сканирование выполняется, попробуйте позже\"}");
+    String ssid = request->getParam("ssid", true)->value();
+    
+    // Ищем сохраненную сеть
+    for (const auto& network : savedNetworks) {
+      if (network.ssid == ssid) {
+        WiFi.begin(network.ssid.c_str(), network.password.c_str());
+        request->send(200, "application/json", "{\"success\":true,\"message\":\"Connecting to network\"}");
+        return;
+      }
+    }
+    
+    request->send(404, "application/json", "{\"error\":\"Network not found in saved networks\"}");
+  });
+  
+  // Маршрут для удаления сохраненной сети
+  server.on("/wifi/delete", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("ssid", true)) {
+      request->send(400, "application/json", "{\"error\":\"Missing SSID parameter\"}");
       return;
     }
     
-    // Если результаты готовы, перенаправляем на первую страницу результатов
-    request->redirect("/scan-results?page=0&size=10");
+    String ssid = request->getParam("ssid", true)->value();
+    
+    // Удаляем сеть из списка
+    for (auto it = savedNetworks.begin(); it != savedNetworks.end(); ++it) {
+      if (it->ssid == ssid) {
+        savedNetworks.erase(it);
+        saveSavedNetworks();
+        request->send(200, "application/json", "{\"success\":true,\"message\":\"Network deleted\"}");
+        return;
+      }
+    }
+    
+    request->send(404, "application/json", "{\"error\":\"Network not found\"}");
   });
   
   // Маршрут для управления режимом AP
@@ -772,40 +829,14 @@ void setupWebServer() {
       }
     }
     
-    if (request->hasParam("hidden", true)) {
-      apConfig.hidden = (request->getParam("hidden", true)->value() == "true");
-    }
-    
     // Применяем новые настройки
     updateAccessPointMode();
     
     request->send(200, "text/plain", "AP settings updated");
   });
   
-  // Маршрут для просмотра логов honeypot
-  server.on("/ap/honeypot/logs", HTTP_GET, [](AsyncWebServerRequest *request){
-    DynamicJsonDocument doc(2048);
-    JsonArray logsArray = doc.createNestedArray("logs");
-    
-    const HoneypotConnection* logs = honeypot.getConnections();
-    int logsCount = honeypot.getConnectionCount();
-    
-    for (int i = 0; i < logsCount; i++) {
-      JsonObject log = logsArray.createNestedObject();
-      log["ip"] = logs[i].clientIP.toString();
-      log["port"] = logs[i].port;
-      log["timestamp"] = logs[i].timestamp;
-      log["data"] = logs[i].requestData;
-    }
-    
-    String response;
-    serializeJson(doc, response);
-    request->send(200, "application/json", response);
-  });
-  
   // Маршрут для подключения к сети
   server.on("/connect", HTTP_POST, [](AsyncWebServerRequest *request){
-    // Проверяем наличие необходимых параметров
     if (!request->hasParam("ssid", true)) {
       request->send(400, "text/plain", "Missing SSID parameter");
       return;
@@ -818,17 +849,29 @@ void setupWebServer() {
       password = request->getParam("password", true)->value();
     }
     
-    // Отключаем текущий режим AP, если активен
-    if (apConfig.mode != AP_MODE_OFF) {
-      apConfig.mode = AP_MODE_OFF;
-      updateAccessPointMode();
+    // Сохраняем сеть
+    bool found = false;
+    for (auto& network : savedNetworks) {
+      if (network.ssid == ssid) {
+        network.password = password;
+        found = true;
+        break;
+      }
     }
+    
+    if (!found) {
+      SavedNetwork newNetwork;
+      newNetwork.ssid = ssid;
+      newNetwork.password = password;
+      savedNetworks.push_back(newNetwork);
+    }
+    
+    saveSavedNetworks();
     
     // Подключаемся к сети
     WiFi.disconnect();
     WiFi.begin(ssid.c_str(), password.c_str());
     
-    // Отправляем статус
     request->send(200, "text/plain", "Connecting to network...");
   });
   
@@ -871,10 +914,7 @@ void setupWebServer() {
       if (request->hasParam("state", true)) {
         bool newState = (request->getParam("state", true)->value() == "true" || 
                          request->getParam("state", true)->value() == "1");
-        // Используем метод togglePin для изменения состояния
-        if (newState != pins[pinIndex].state) {
-          kvmModule.togglePin(pinIndex);
-        }
+        kvmModule.setPin(pinIndex, newState);
       } else {
         // Иначе просто переключаем
         kvmModule.togglePin(pinIndex);
@@ -894,26 +934,70 @@ void setupWebServer() {
     }
   });
   
+  // API для получения доступных пинов
+  server.on("/api/kvm/available-pins", HTTP_GET, [](AsyncWebServerRequest *request){
+    DynamicJsonDocument doc(2048);
+    JsonArray pinsArray = doc.createNestedArray("pins");
+    
+    const auto& usedPins = kvmModule.getPins();
+    
+    for (int i = 0; i < AVAILABLE_PINS_COUNT; i++) {
+      JsonObject pinObj = pinsArray.createNestedObject();
+      pinObj["pin"] = AVAILABLE_PINS[i].pin;
+      pinObj["name"] = AVAILABLE_PINS[i].name;
+      pinObj["description"] = AVAILABLE_PINS[i].description;
+      
+      // Проверяем, используется ли пин
+      bool inUse = false;
+      for (const auto& usedPin : usedPins) {
+        if (usedPin.pin == AVAILABLE_PINS[i].pin) {
+          inUse = true;
+          break;
+        }
+      }
+      pinObj["inUse"] = inUse;
+    }
+    
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+  
   // API для управления через curl
   server.on("/api/kvm/pin", HTTP_POST, [](AsyncWebServerRequest *request){
-    // Тот же функционал, что и в /kvm/pin, но в формате API
-    // для совместимости с curl и скриптами
-    if (!request->hasParam("index", true)) {
+    // Проверяем наличие параметра в URL или в теле запроса
+    int pinIndex = -1;
+    
+    if (request->hasParam("index")) {
+      pinIndex = request->getParam("index")->value().toInt();
+    } else if (request->hasParam("index", true)) {
+      pinIndex = request->getParam("index", true)->value().toInt();
+    }
+    
+    if (pinIndex == -1) {
       request->send(400, "application/json", "{\"error\":\"Missing pin index parameter\"}");
       return;
     }
     
-    int pinIndex = request->getParam("index", true)->value().toInt();
     const auto& pins = kvmModule.getPins();
     
     if (pinIndex >= 0 && pinIndex < pins.size()) {
-      if (request->hasParam("state", true)) {
-        bool newState = (request->getParam("state", true)->value() == "true" || 
-                         request->getParam("state", true)->value() == "1");
-        // Используем метод togglePin для изменения состояния
-        if (newState != pins[pinIndex].state) {
-          kvmModule.togglePin(pinIndex);
-        }
+      bool newState = false;
+      bool hasState = false;
+      
+      // Проверяем параметр state в URL или в теле запроса
+      if (request->hasParam("state")) {
+        hasState = true;
+        String stateStr = request->getParam("state")->value();
+        newState = (stateStr == "true" || stateStr == "1");
+      } else if (request->hasParam("state", true)) {
+        hasState = true;
+        String stateStr = request->getParam("state", true)->value();
+        newState = (stateStr == "true" || stateStr == "1");
+      }
+      
+      if (hasState) {
+        kvmModule.setPin(pinIndex, newState);
       } else {
         kvmModule.togglePin(pinIndex);
       }
@@ -923,6 +1007,40 @@ void setupWebServer() {
       doc["success"] = true;
       doc["pin"] = pins[pinIndex].pin;
       doc["state"] = pins[pinIndex].state;
+      
+      String response;
+      serializeJson(doc, response);
+      request->send(200, "application/json", response);
+    } else {
+      request->send(404, "application/json", "{\"error\":\"Pin not found\"}");
+    }
+  });
+  
+  // Маршрут для импульса на пин
+  server.on("/api/kvm/pulse", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("index", true)) {
+      request->send(400, "application/json", "{\"error\":\"Missing pin index parameter\"}");
+      return;
+    }
+    
+    int pinIndex = request->getParam("index", true)->value().toInt();
+    int duration = 500; // Значение по умолчанию
+    
+    if (request->hasParam("duration", true)) {
+      duration = request->getParam("duration", true)->value().toInt();
+      if (duration < 50) duration = 50;
+      if (duration > 10000) duration = 10000;
+    }
+    
+    const auto& pins = kvmModule.getPins();
+    
+    if (pinIndex >= 0 && pinIndex < pins.size()) {
+      kvmModule.pulsePin(pinIndex, duration);
+      
+      DynamicJsonDocument doc(256);
+      doc["success"] = true;
+      doc["pin"] = pins[pinIndex].pin;
+      doc["duration"] = duration;
       
       String response;
       serializeJson(doc, response);
@@ -1002,6 +1120,13 @@ void setupWebServer() {
     request->send(200, "text/plain", "Find Me signal activated");
   });
   
+  // Маршрут для перезагрузки устройства
+  server.on("/device/reset", HTTP_POST, [](AsyncWebServerRequest *request){
+    request->send(200, "text/plain", "Device will restart");
+    delay(1000);
+    ESP.restart();
+  });
+  
   // Маршрут для получения настроек устройства
   server.on("/device", HTTP_GET, [](AsyncWebServerRequest *request){
     DynamicJsonDocument doc(512);
@@ -1022,6 +1147,7 @@ void setupWebServer() {
       int brightness = request->getParam("brightness", true)->value().toInt();
       if (brightness >= 0 && brightness <= 100) {
         deviceSettings.brightness = brightness;
+        globalDeviceSettings.brightness = brightness;
         M5.Lcd.setBrightness(brightness);
       }
     }
@@ -1043,7 +1169,7 @@ void setupWebServer() {
       if (deviceSettings.rotateDisplay != rotateDisplay) {
         deviceSettings.rotateDisplay = rotateDisplay;
         M5.Lcd.setRotation(rotateDisplay ? 1 : 3);
-        drawMenu(); // Перерисовываем меню при изменении ориентации
+        drawMenu();
       }
     }
     
@@ -1051,6 +1177,7 @@ void setupWebServer() {
       int volume = request->getParam("volume", true)->value().toInt();
       if (volume >= 0 && volume <= 100) {
         deviceSettings.volume = volume;
+        globalDeviceSettings.volume = volume;
       }
     }
     
@@ -1060,145 +1187,233 @@ void setupWebServer() {
     request->send(200, "text/plain", "Device settings updated");
   });
   
-  // Маршрут для сетевых инструментов
-  server.on("/network", HTTP_GET, [](AsyncWebServerRequest *request){
-    // HTML страница с сетевыми инструментами
-    String html = "<html><head><title>Network Tools</title></head><body>";
-    html += "<h1>Network Tools</h1>";
+  // Маршрут для получения настроек инвертирования пинов
+  server.on("/settings/pin-inversion", HTTP_GET, [](AsyncWebServerRequest *request){
+    DynamicJsonDocument doc(256);
+    doc["inverted"] = deviceSettings.invertPins;
     
-    // Ping tool
-    html += "<h2>Ping Tool</h2>";
-    html += "<form action='/network/ping' method='post'>";
-    html += "<label for='host'>Host or IP:</label>";
-    html += "<input type='text' id='host' name='host' required>";
-    html += "<button type='submit'>Ping</button>";
-    html += "</form>";
-    
-    // IP Scanner
-    html += "<h2>IP Scanner</h2>";
-    html += "<form action='/network/scan' method='post'>";
-    html += "<label for='range'>IP Range (e.g. 192.168.1.1-192.168.1.254):</label>";
-    html += "<input type='text' id='range' name='range' required>";
-    html += "<button type='submit'>Scan</button>";
-    html += "</form>";
-    
-    // Port Scanner
-    html += "<h2>Port Scanner</h2>";
-    html += "<form action='/network/portscan' method='post'>";
-    html += "<label for='ip'>IP Address:</label>";
-    html += "<input type='text' id='ip' name='ip' required><br>";
-    html += "<label for='startPort'>Start Port:</label>";
-    html += "<input type='number' id='startPort' name='startPort' value='1'><br>";
-    html += "<label for='endPort'>End Port:</label>";
-    html += "<input type='number' id='endPort' name='endPort' value='1024'><br>";
-    html += "<button type='submit'>Scan Ports</button>";
-    html += "</form>";
-    
-    // IP Blocking (only for AP mode)
-    html += "<h2>IP Blocking</h2>";
-    if (apConfig.mode != AP_MODE_OFF) {
-      html += "<form action='/network/block' method='post'>";
-      html += "<label for='blockIP'>IP to Block:</label>";
-      html += "<input type='text' id='blockIP' name='ip' required>";
-      html += "<button type='submit'>Block IP</button>";
-      html += "</form>";
-      
-      // Список заблокированных IP
-      html += "<h3>Blocked IPs</h3>";
-      html += "<div id='blockedIPs'>";
-      const auto& blockedIPs = networkTools.getBlockedIPs();
-      if (blockedIPs.size() > 0) {
-        html += "<ul>";
-        for (const auto& ip : blockedIPs) {
-          html += "<li>" + ip + " <a href='/network/unblock?ip=" + ip + "'>Unblock</a></li>";
-        }
-        html += "</ul>";
-      } else {
-        html += "<p>No blocked IPs</p>";
-      }
-      html += "</div>";
-    } else {
-      html += "<p>IP Blocking is only available in AP mode</p>";
-    }
-    
-    html += "</body></html>";
-    request->send(200, "text/html", html);
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
   });
   
-  // Маршрут для Device Settings
-  server.on("/device", HTTP_GET, [](AsyncWebServerRequest *request){
-    // HTML страница с настройками устройства
-    String html = "<html><head><title>Device Settings</title></head><body>";
-    html += "<h1>Device Settings</h1>";
+  // Маршрут для изменения настроек инвертирования пинов
+  server.on("/settings/pin-inversion", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("inverted", true)) {
+      request->send(400, "application/json", "{\"error\":\"Missing inverted parameter\"}");
+      return;
+    }
     
-    html += "<form action='/device/settings' method='post'>";
+    bool inverted = (request->getParam("inverted", true)->value() == "true" || 
+                     request->getParam("inverted", true)->value() == "1");
     
-    // Brightness
-    html += "<div>";
-    html += "<label for='brightness'>Brightness (0-100%):</label>";
-    html += "<input type='number' id='brightness' name='brightness' min='0' max='100' value='" + String(deviceSettings.brightness) + "'>";
-    html += "</div><br>";
+    if (deviceSettings.invertPins != inverted) {
+      deviceSettings.invertPins = inverted;
+      saveDeviceSettings();
+      
+      // Обновляем состояние всех пинов
+      const auto& pins = kvmModule.getPins();
+      for (int i = 0; i < pins.size(); i++) {
+        kvmModule.setPin(i, pins[i].state);
+      }
+    }
     
-    // Sleep Timeout
-    html += "<div>";
-    html += "<label for='sleepTimeout'>Sleep Timeout (seconds, 0 = disabled):</label>";
-    html += "<input type='number' id='sleepTimeout' name='sleepTimeout' min='0' value='" + String(deviceSettings.sleepTimeout) + "'>";
-    html += "</div><br>";
+    DynamicJsonDocument doc(256);
+    doc["success"] = true;
+    doc["inverted"] = deviceSettings.invertPins;
     
-    // Device ID
-    html += "<div>";
-    html += "<label for='deviceId'>Device ID:</label>";
-    html += "<input type='text' id='deviceId' name='deviceId' value='" + deviceSettings.deviceId + "'>";
-    html += "</div><br>";
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+  
+  // Маршрут для сетевых инструментов - Ping
+  server.on("/network/ping", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("host", true)) {
+      request->send(400, "application/json", "{\"error\":\"Missing host parameter\"}");
+      return;
+    }
     
-    // Rotate Display
-    html += "<div>";
-    html += "<label for='rotateDisplay'>Rotate Display:</label>";
-    html += "<input type='checkbox' id='rotateDisplay' name='rotateDisplay' value='1' " + String(deviceSettings.rotateDisplay ? "checked" : "") + ">";
-    html += "</div><br>";
+    String host = request->getParam("host", true)->value();
+    PingResult result = networkTools.ping(host);
     
-    // Volume
-    html += "<div>";
-    html += "<label for='volume'>Volume (0-100%):</label>";
-    html += "<input type='number' id='volume' name='volume' min='0' max='100' value='" + String(deviceSettings.volume) + "'>";
-    html += "</div><br>";
+    DynamicJsonDocument doc(512);
+    doc["success"] = result.success;
+    doc["host"] = result.target;
+    doc["ip"] = result.ip.toString();
+    doc["time"] = result.avg_time;
+    doc["loss"] = result.loss;
     
-    html += "<button type='submit'>Save Settings</button>";
-    html += "</form>";
+    if (!result.success && result.error.length() > 0) {
+      doc["error"] = result.error;
+    }
     
-    // Hardware Info
-    html += "<h2>Hardware Information</h2>";
-    html += "<ul>";
-    html += "<li>Model: M5StickC Plus2</li>";
-    html += "<li>Battery: " + String(M5.Power.getBatteryVoltage() / 1000.0f, 2) + "V</li>";
-    html += "<li>MAC Address: " + WiFi.macAddress() + "</li>";
-    html += "</ul>";
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+  
+  // Маршрут для сетевых инструментов - Сканирование IP
+  server.on("/network/scan", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("range", true)) {
+      request->send(400, "application/json", "{\"error\":\"Missing range parameter\"}");
+      return;
+    }
     
-    html += "</body></html>";
-    request->send(200, "text/html", html);
+    String range = request->getParam("range", true)->value();
+    std::vector<ScanResult> results = networkTools.scanNetwork(range);
+    
+    DynamicJsonDocument doc(4096);
+    doc["success"] = true;
+    JsonArray hostsArray = doc.createNestedArray("hosts");
+    
+    for (const auto& result : results) {
+      JsonObject hostObj = hostsArray.createNestedObject();
+      hostObj["ip"] = result.ip.toString();
+      hostObj["active"] = result.active;
+      hostObj["time"] = result.response_time;
+    }
+    
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+  
+  // Маршрут для сетевых инструментов - Сканирование портов
+  server.on("/network/portscan", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("ip", true) || 
+        !request->hasParam("startPort", true) || 
+        !request->hasParam("endPort", true)) {
+      request->send(400, "application/json", "{\"error\":\"Missing required parameters\"}");
+      return;
+    }
+    
+    String ip = request->getParam("ip", true)->value();
+    int startPort = request->getParam("startPort", true)->value().toInt();
+    int endPort = request->getParam("endPort", true)->value().toInt();
+    
+    std::vector<PortScanResult> results = networkTools.scanPorts(ip, startPort, endPort);
+    
+    DynamicJsonDocument doc(4096);
+    doc["success"] = true;
+    JsonArray portsArray = doc.createNestedArray("ports");
+    
+    for (const auto& result : results) {
+      if (result.open) {
+        JsonObject portObj = portsArray.createNestedObject();
+        portObj["port"] = result.port;
+        portObj["service"] = result.service;
+      }
+    }
+    
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+  
+  // Маршрут для сетевых инструментов - Сканирование одного IP
+  server.on("/network/scan-single", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("ip", true)) {
+      request->send(400, "application/json", "{\"error\":\"Missing IP parameter\"}");
+      return;
+    }
+    
+    String ip = request->getParam("ip", true)->value();
+    PingResult result = networkTools.ping(ip, 1);
+    
+    DynamicJsonDocument doc(256);
+    doc["success"] = result.success;
+    doc["active"] = result.success;
+    doc["time"] = result.avg_time;
+    
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+  
+  // Маршрут для сетевых инструментов - Блокировка IP
+  server.on("/network/block", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("ip", true)) {
+      request->send(400, "application/json", "{\"error\":\"Missing IP parameter\"}");
+      return;
+    }
+    
+    String ip = request->getParam("ip", true)->value();
+    
+    if (networkTools.blockIP(ip)) {
+      request->send(200, "application/json", "{\"success\":true,\"message\":\"IP blocked\"}");
+    } else {
+      request->send(400, "application/json", "{\"error\":\"Failed to block IP\"}");
+    }
+  });
+  
+  // Маршрут для сетевых инструментов - Разблокировка IP
+  server.on("/network/unblock", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("ip", true)) {
+      request->send(400, "application/json", "{\"error\":\"Missing IP parameter\"}");
+      return;
+    }
+    
+    String ip = request->getParam("ip", true)->value();
+    
+    if (networkTools.unblockIP(ip)) {
+      request->send(200, "application/json", "{\"success\":true,\"message\":\"IP unblocked\"}");
+    } else {
+      request->send(400, "application/json", "{\"error\":\"Failed to unblock IP\"}");
+    }
+  });
+  
+  // Маршрут для получения списка заблокированных IP
+  server.on("/network/blocked", HTTP_GET, [](AsyncWebServerRequest *request){
+    const auto& blockedIPs = networkTools.getBlockedIPs();
+    
+    DynamicJsonDocument doc(2048);
+    JsonArray blockedArray = doc.createNestedArray("blocked");
+    
+    for (const auto& ip : blockedIPs) {
+      blockedArray.add(ip);
+    }
+    
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
   });
   
   // Запуск веб-сервера
   server.begin();
 }
 
-// Функция воспроизведения сигнала "Find Me"
-void playFindMeSound() {
-  // Воспроизводим звуковой сигнал прерывисто с учетом настройки громкости
-  int toneVolume = map(deviceSettings.volume, 0, 100, 0, 255);
-  for (int i = 0; i < 5; i++) {
-    M5.Speaker.setVolume(toneVolume);
-    M5.Speaker.tone(2000, 300);
-    delay(300);
-    M5.Speaker.tone(1500, 300);
-    delay(300);
-  }
-  // Останавливаем звук
-  M5.Speaker.tone(0);
-}
-
 // Обработка нажатий кнопок
 void handleButtons() {
+  // Проверка долгого нажатия на кнопку C (Power/Scroll Up)
+  if (M5.BtnC.isPressed()) {
+    if (buttonCLastPress == 0) {
+      buttonCLastPress = millis();
+    } else if (!buttonCLongPress && millis() - buttonCLastPress > 3000) {
+      // Долгое нажатие на C - выключение устройства
+      buttonCLongPress = true;
+      M5.Power.powerOff();
+    }
+  } else {
+    if (buttonCLastPress > 0 && !buttonCLongPress) {
+      // Короткое нажатие на C - прокрутка вверх
+      int maxItems = getMaxMenuItems();
+      selectedMenuItem = (selectedMenuItem > 0) ? selectedMenuItem - 1 : maxItems - 1;
+      
+      // Корректируем позицию прокрутки
+      int displayLines = (M5.Lcd.height() - 30) / 16;
+      if (selectedMenuItem < menuStartPosition) {
+        menuStartPosition = selectedMenuItem;
+      } else if (selectedMenuItem == maxItems - 1 && maxItems > displayLines) {
+        menuStartPosition = maxItems - displayLines;
+      }
+      
+      drawMenu();
+    }
+    buttonCLastPress = 0;
+    buttonCLongPress = false;
+  }
+  
   // Проверка долгого нажатия на кнопку A (Home)
   if (M5.BtnA.isPressed()) {
     if (buttonALastPress == 0) {
@@ -1220,104 +1435,61 @@ void handleButtons() {
     buttonALongPress = false;
   }
   
-  // Кнопка B
-  if (M5.BtnB.isPressed()) {
-    if (buttonBLastPress == 0) {
-      buttonBLastPress = millis();
-    } else if (!buttonBLongPress && millis() - buttonBLastPress > 1000) {
-      // Долгое нажатие на B (1 секунда) - перемещение вверх
-      buttonBLongPress = true;
-      
-      // Получаем максимальное количество элементов для цикличного перехода
-      int maxItems = getMaxMenuItems();
-      
-      // Цикличное перемещение вверх 
-      selectedMenuItem = (selectedMenuItem > 0) ? selectedMenuItem - 1 : maxItems - 1;
-      
-      // Корректируем позицию прокрутки если нужно
-      int displayLines = M5.Lcd.height() / 16;
-      if (selectedMenuItem < menuStartPosition) {
-        menuStartPosition = selectedMenuItem;
-      } else if (selectedMenuItem >= menuStartPosition + displayLines) {
-        menuStartPosition = selectedMenuItem - displayLines + 1;
-      }
-      
-      drawMenu();
+  // Кнопка B (Control/Scroll Down)
+  if (M5.BtnB.wasPressed()) {
+    // Короткое нажатие на B - прокрутка вниз
+    int maxItems = getMaxMenuItems();
+    selectedMenuItem = (selectedMenuItem < maxItems - 1) ? selectedMenuItem + 1 : 0;
+    
+    // Корректируем позицию прокрутки
+    int displayLines = (M5.Lcd.height() - 30) / 16;
+    if (selectedMenuItem >= menuStartPosition + displayLines) {
+      menuStartPosition = selectedMenuItem - displayLines + 1;
+    } else if (selectedMenuItem == 0) {
+      menuStartPosition = 0;
     }
-  } else {
-    if (buttonBLastPress > 0) {
-      if (!buttonBLongPress) {
-        // Короткое нажатие на B - перемещение вниз
-        
-        // Получаем максимальное количество элементов 
-        int maxItems = getMaxMenuItems();
-        
-        // Цикличное перемещение вниз
-        selectedMenuItem = (selectedMenuItem < maxItems - 1) ? selectedMenuItem + 1 : 0;
-        
-        // Корректируем позицию прокрутки если нужно
-        int displayLines = M5.Lcd.height() / 16;
-        if (selectedMenuItem < menuStartPosition) {
-          menuStartPosition = selectedMenuItem;
-        } else if (selectedMenuItem >= menuStartPosition + displayLines) {
-          menuStartPosition = selectedMenuItem - displayLines + 1;
-        }
-        
-        drawMenu();
-      }
-      buttonBLastPress = 0;
-      buttonBLongPress = false;
-    }
+    
+    drawMenu();
   }
 }
 
 // Функция для получения максимального количества элементов в текущем меню
 int getMaxMenuItems() {
-  int maxItems = 0;
-  
   switch (currentSection) {
     case MENU_MAIN:
-      maxItems = MAIN_MENU_ITEMS_COUNT;
-      break;
-      
+      return MAIN_MENU_ITEMS_COUNT;
+    
     case MENU_AP_OPTIONS:
-      maxItems = AP_OPTIONS_ITEMS_COUNT;
-      break;
-      
+      return AP_OPTIONS_ITEMS_COUNT;
+    
+    case MENU_AP_MODE_SELECT:
+      return AP_MODE_ITEMS_COUNT;
+    
     case MENU_WIFI_SCAN:
-      // Динамическое количество - количество найденных сетей 
-      // (или минимум 1, если список пуст)
-      maxItems = networks.size() > 0 ? networks.size() : 1;
-      break;
-      
+      return networks.size() > 0 ? networks.size() : 1;
+    
+    case MENU_WIFI_SAVED:
+      return savedNetworks.size() + 1; // +1 для кнопки возврата
+    
     case MENU_KVM_OPTIONS: {
-      // Динамическое количество - все пины + 3 дополнительных пункта
       const auto& pins = kvmModule.getPins();
-      maxItems = pins.size() + 3; // Пины + настройки + DHCP + возврат
-      break;
+      return pins.size() + 3; // Пины + настройки
     }
-      
-    case MENU_KVM_MONITOR:
-      // В режиме мониторинга можно прокручивать список пинов
-      maxItems = kvmModule.getPins().size() + 3; // Пины + информация о сети + заголовок
-      break;
-      
+    
+    case MENU_KVM_MONITOR: {
+      const auto& pins = kvmModule.getPins();
+      return pins.size() + 2; // Пины + инфо
+    }
+    
     case MENU_IR_CONTROL:
-      // Базовое количество элементов для IR Control
-      maxItems = 5;
-      break;
-      
+      return 1; // Только кнопка возврата
+    
     case MENU_DEVICE_SETTINGS:
-      // Пункты настроек устройства
-      maxItems = DEVICE_SETTINGS_ITEMS_COUNT;
-      break;
-      
+      return DEVICE_SETTINGS_ITEMS_COUNT;
+    
     default:
-      // По умолчанию даем возможность прокрутки
-      maxItems = 10;
+      return 1;
   }
-  
-  return maxItems;
 }
 
 // Отрисовка меню
@@ -1333,25 +1505,31 @@ void drawMenu() {
   
   switch (currentSection) {
     case MENU_MAIN:
-      M5.Lcd.println("MAIN MENU             ");
+      M5.Lcd.println("MAIN MENU");
       break;
     case MENU_AP_OPTIONS:
-      M5.Lcd.println("AP OPTIONS            ");
+      M5.Lcd.println("AP OPTIONS");
+      break;
+    case MENU_AP_MODE_SELECT:
+      M5.Lcd.println("AP MODE SELECT");
       break;
     case MENU_WIFI_SCAN:
-      M5.Lcd.println("WiFi SCAN & DEBUG     ");
+      M5.Lcd.println("WiFi SCAN & DEBUG");
+      break;
+    case MENU_WIFI_SAVED:
+      M5.Lcd.println("SAVED NETWORKS");
       break;
     case MENU_KVM_OPTIONS:
-      M5.Lcd.println("KVM OPTIONS           ");
+      M5.Lcd.println("KVM OPTIONS");
       break;
     case MENU_KVM_MONITOR:
-      M5.Lcd.println("KVM MONITOR           ");
+      M5.Lcd.println("KVM MONITOR");
       break;
     case MENU_IR_CONTROL:
-      M5.Lcd.println("IR CONTROL            ");
+      M5.Lcd.println("IR CONTROL");
       break;
     case MENU_DEVICE_SETTINGS:
-      M5.Lcd.println("DEVICE SETTINGS       ");
+      M5.Lcd.println("DEVICE SETTINGS");
       break;
   }
   
@@ -1359,35 +1537,22 @@ void drawMenu() {
   M5.Lcd.print(batteryBuf);
   M5.Lcd.drawLine(0, 10, M5.Lcd.width(), 10, WHITE);
   
-  // Отображение элементов меню в зависимости от раздела
-  int y = 15;
-  int displayLines = (M5.Lcd.height() - 15) / 16; // Расчет количества строк на экране
-  
-  // Получаем максимальное количество элементов в текущем меню
+  // Отображение элементов меню
+  int y = 20;
+  int displayLines = (M5.Lcd.height() - 30) / 16;
   int maxItems = getMaxMenuItems();
   
-  // Убедимся, что menuStartPosition в пределах допустимого диапазона
+  // Корректируем позицию прокрутки
   if (menuStartPosition > maxItems - displayLines) {
     menuStartPosition = max(0, maxItems - displayLines);
   }
   
-  // Убедимся, что selectedMenuItem в пределах допустимого диапазона
-  if (selectedMenuItem >= maxItems) {
-    selectedMenuItem = maxItems - 1;
-  }
-  if (selectedMenuItem < 0) {
-    selectedMenuItem = 0;
-  }
-  
   switch (currentSection) {
     case MENU_MAIN: {
-      // Главное меню
       for (int i = menuStartPosition; i < MAIN_MENU_ITEMS_COUNT && i < menuStartPosition + displayLines; i++) {
         M5.Lcd.setCursor(5, y);
         if (i == selectedMenuItem) {
           M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
-          M5.Lcd.setTextColor(WHITE);
-        } else {
           M5.Lcd.setTextColor(WHITE);
         }
         M5.Lcd.print(mainMenuItems[i].title);
@@ -1396,47 +1561,65 @@ void drawMenu() {
       }
       break;
     }
-      
+    
     case MENU_AP_OPTIONS: {
-      // Меню настроек точки доступа
       for (int i = menuStartPosition; i < AP_OPTIONS_ITEMS_COUNT && i < menuStartPosition + displayLines; i++) {
         M5.Lcd.setCursor(5, y);
         if (i == selectedMenuItem) {
           M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
           M5.Lcd.setTextColor(WHITE);
-        } else {
-          M5.Lcd.setTextColor(WHITE);
         }
         
-        // Отмечаем активный режим AP
-        if (i >= 0 && i <= 4) { // Режимы AP
-          if ((i-0) == apConfig.mode) {
-            M5.Lcd.print("> ");
-          } else {
-            M5.Lcd.print("  ");
+        if (i == 0) { // AP Mode
+          M5.Lcd.print(apOptionsItems[i]);
+          M5.Lcd.print(": ");
+          switch (apConfig.mode) {
+            case AP_MODE_OFF: M5.Lcd.print("Off"); break;
+            case AP_MODE_NORMAL: M5.Lcd.print("Normal"); break;
+            case AP_MODE_REPEATER: M5.Lcd.print("Repeater"); break;
+            case AP_MODE_HIDDEN: M5.Lcd.print("Hidden"); break;
+            case AP_MODE_HONEYPOT: M5.Lcd.print("Honeypot"); break;
           }
+        } else {
+          M5.Lcd.print(apOptionsItems[i]);
         }
         
-        M5.Lcd.print(apOptionsItems[i]);
         y += 16;
         M5.Lcd.setTextColor(WHITE);
       }
       break;
     }
-      
+    
+    case MENU_AP_MODE_SELECT: {
+      for (int i = menuStartPosition; i < AP_MODE_ITEMS_COUNT && i < menuStartPosition + displayLines; i++) {
+        M5.Lcd.setCursor(5, y);
+        if (i == selectedMenuItem) {
+          M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
+          M5.Lcd.setTextColor(WHITE);
+        }
+        
+        if (i == (int)apConfig.mode) {
+          M5.Lcd.print("> ");
+        } else {
+          M5.Lcd.print("  ");
+        }
+        
+        M5.Lcd.print(apModeItems[i]);
+        y += 16;
+        M5.Lcd.setTextColor(WHITE);
+      }
+      break;
+    }
+    
     case MENU_WIFI_SCAN: {
-      // Меню сканирования WiFi
       if (networks.size() > 0) {
         for (int i = menuStartPosition; i < networks.size() && i < menuStartPosition + displayLines; i++) {
           M5.Lcd.setCursor(5, y);
           if (i == selectedMenuItem) {
             M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
             M5.Lcd.setTextColor(WHITE);
-          } else {
-            M5.Lcd.setTextColor(WHITE);
           }
           
-          // Показываем базовую информацию о сети
           String networkInfo = networks[i].ssid;
           if (networkInfo.length() > 10) {
             networkInfo = networkInfo.substring(0, 10) + "...";
@@ -1447,90 +1630,98 @@ void drawMenu() {
           y += 16;
           M5.Lcd.setTextColor(WHITE);
         }
+      } else if (isScanningWifi) {
+        M5.Lcd.setCursor(5, y);
+        M5.Lcd.print("Scanning...");
       } else {
         M5.Lcd.setCursor(5, y);
         M5.Lcd.print("Press A to scan WiFi");
       }
       break;
     }
-      
-    case MENU_KVM_MONITOR: {
-      // Отображение информации KVM-монитора
-      const auto& networkInfo = deviceManager.getNetworkInfo();
-      
-      // Отображаем информацию о сети только если не в режиме прокрутки
-      if (menuStartPosition == 0) {
-        M5.Lcd.setCursor(5, y);
-        if (networkInfo.connected) {
-          M5.Lcd.print("WiFi: ");
-          M5.Lcd.print(networkInfo.ssid);
-          y += 16;
+    
+    case MENU_WIFI_SAVED: {
+      if (savedNetworks.size() > 0) {
+        for (int i = menuStartPosition; i < savedNetworks.size() && i < menuStartPosition + displayLines; i++) {
           M5.Lcd.setCursor(5, y);
-          M5.Lcd.print("IP: ");
-          M5.Lcd.print(networkInfo.localIP);
-        } else {
-          M5.Lcd.print("WiFi: Not Connected");
+          if (i == selectedMenuItem) {
+            M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
+            M5.Lcd.setTextColor(WHITE);
+          }
+          
+          M5.Lcd.print(savedNetworks[i].ssid);
+          y += 16;
+          M5.Lcd.setTextColor(WHITE);
         }
-        
-        y += 16;
+      } else {
         M5.Lcd.setCursor(5, y);
-        M5.Lcd.print("KVM Pins:");
+        M5.Lcd.print("No saved networks");
         y += 16;
       }
       
-      // Отображаем состояние пинов с учетом прокрутки
-      const auto& kvmPins = kvmModule.getPins();
-      
-      // Вычисляем смещение для отображения пинов
-      int pinOffset = (menuStartPosition > 0) ? menuStartPosition - 3 : 0;
-      if (pinOffset < 0) pinOffset = 0;
-      
-      // Отображаем пины с учетом смещения
-      for (int i = pinOffset; i < kvmPins.size() && y < M5.Lcd.height(); i++) {
+      // Кнопка возврата
+      if (savedNetworks.size() <= menuStartPosition + displayLines - 1) {
         M5.Lcd.setCursor(5, y);
-        // Вычисляем соответствующий индекс для выделения
-        int itemIndex = i + (menuStartPosition > 0 ? 3 : 0);
-        
-        if (itemIndex == selectedMenuItem) {
+        if (savedNetworks.size() == selectedMenuItem) {
+          M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
+          M5.Lcd.setTextColor(WHITE);
+        }
+        M5.Lcd.print("Back to Main Menu");
+        M5.Lcd.setTextColor(WHITE);
+      }
+      break;
+    }
+    
+    case MENU_KVM_MONITOR: {
+      const auto& networkInfo = deviceManager.getNetworkInfo();
+      
+      // Отображаем информацию о сети
+      M5.Lcd.setCursor(5, y);
+      if (networkInfo.connected) {
+        M5.Lcd.print("WiFi: ");
+        M5.Lcd.print(networkInfo.ssid);
+        y += 16;
+        M5.Lcd.setCursor(5, y);
+        M5.Lcd.print("IP: ");
+        M5.Lcd.print(networkInfo.localIP);
+      } else {
+        M5.Lcd.print("WiFi: Not Connected");
+      }
+      
+      y += 16;
+      M5.Lcd.setCursor(5, y);
+      M5.Lcd.print("KVM Pins:");
+      y += 16;
+      
+      // Отображаем состояние пинов
+      const auto& kvmPins = kvmModule.getPins();
+      for (int i = 0; i < kvmPins.size() && y < M5.Lcd.height() - 16; i++) {
+        M5.Lcd.setCursor(5, y);
+        if (i == selectedMenuItem - 2) {
           M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
           M5.Lcd.setTextColor(WHITE);
         }
         
         M5.Lcd.print(kvmPins[i].name);
         M5.Lcd.print(": ");
-        if (kvmPins[i].state) {
-          M5.Lcd.print("ON");
+        if (deviceSettings.invertPins) {
+          M5.Lcd.print(kvmPins[i].state ? "OFF" : "ON");
         } else {
-          M5.Lcd.print("OFF");
+          M5.Lcd.print(kvmPins[i].state ? "ON" : "OFF");
         }
         y += 16;
         M5.Lcd.setTextColor(WHITE);
       }
       break;
     }
-      
+    
     case MENU_KVM_OPTIONS: {
-      // Меню настроек KVM
       const auto& pins = kvmModule.getPins();
       
-      // Отображаем заголовок только если не в режиме прокрутки
-      if (menuStartPosition == 0) {
-        M5.Lcd.setCursor(5, y);
-        M5.Lcd.print("Configure KVM pins:");
-        y += 16;
-      }
-      
-      // Вычисляем смещение для отображения пинов
-      int pinOffset = (menuStartPosition > 0) ? menuStartPosition - 1 : 0;
-      if (pinOffset < 0) pinOffset = 0;
-      
       // Отображаем пины для настройки
-      for (int i = pinOffset; i < pins.size() && y < M5.Lcd.height() - 32; i++) {
+      for (int i = menuStartPosition; i < pins.size() && i < menuStartPosition + displayLines; i++) {
         M5.Lcd.setCursor(5, y);
-        // Вычисляем соответствующий индекс для выделения
-        int itemIndex = i + (menuStartPosition > 0 ? 1 : 0);
-        
-        if (itemIndex == selectedMenuItem) {
+        if (i == selectedMenuItem) {
           M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
           M5.Lcd.setTextColor(WHITE);
         }
@@ -1547,7 +1738,7 @@ void drawMenu() {
       int extraItemsStart = pins.size();
       
       // Connection Check
-      if (extraItemsStart <= menuStartPosition + displayLines && y < M5.Lcd.height() - 16) {
+      if (extraItemsStart <= menuStartPosition + displayLines) {
         M5.Lcd.setCursor(5, y);
         if (extraItemsStart == selectedMenuItem) {
           M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
@@ -1568,7 +1759,7 @@ void drawMenu() {
       }
       
       // DHCP
-      if (extraItemsStart + 1 <= menuStartPosition + displayLines && y < M5.Lcd.height() - 16) {
+      if (extraItemsStart + 1 <= menuStartPosition + displayLines) {
         M5.Lcd.setCursor(5, y);
         if (extraItemsStart + 1 == selectedMenuItem) {
           M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
@@ -1582,7 +1773,7 @@ void drawMenu() {
       }
       
       // Back to Main Menu
-      if (extraItemsStart + 2 <= menuStartPosition + displayLines && y < M5.Lcd.height()) {
+      if (extraItemsStart + 2 <= menuStartPosition + displayLines) {
         M5.Lcd.setCursor(5, y);
         if (extraItemsStart + 2 == selectedMenuItem) {
           M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
@@ -1594,9 +1785,8 @@ void drawMenu() {
       }
       break;
     }
-      
+    
     case MENU_IR_CONTROL: {
-      // Заглушка для ИК-управления
       M5.Lcd.setCursor(5, y);
       M5.Lcd.print("IR Control - Coming Soon");
       y += 16;
@@ -1610,30 +1800,25 @@ void drawMenu() {
       M5.Lcd.print("Press A to return");
       break;
     }
-      
+    
     case MENU_DEVICE_SETTINGS: {
-      // Меню настроек устройства
       for (int i = menuStartPosition; i < DEVICE_SETTINGS_ITEMS_COUNT && i < menuStartPosition + displayLines; i++) {
         M5.Lcd.setCursor(5, y);
         if (i == selectedMenuItem) {
           M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
           M5.Lcd.setTextColor(WHITE);
-        } else {
-          M5.Lcd.setTextColor(WHITE);
         }
         
-        // Вывод название пункта и текущего значения
         M5.Lcd.print(deviceSettingsItems[i]);
         
-        // Отображаем текущее значение параметра
         switch (i) {
           case 0: // Brightness
-            M5.Lcd.setCursor(100, y);
+            M5.Lcd.print(": ");
             M5.Lcd.print(deviceSettings.brightness);
             M5.Lcd.print("%");
             break;
           case 1: // Sleep Timeout
-            M5.Lcd.setCursor(100, y);
+            M5.Lcd.print(": ");
             if (deviceSettings.sleepTimeout == 0) {
               M5.Lcd.print("Off");
             } else {
@@ -1642,23 +1827,26 @@ void drawMenu() {
             }
             break;
           case 2: // Device ID
-            if (deviceSettings.deviceId.length() > 10) {
-              M5.Lcd.setCursor(100, y);
-              M5.Lcd.print(deviceSettings.deviceId.substring(0, 10));
+            M5.Lcd.print(": ");
+            if (deviceSettings.deviceId.length() > 8) {
+              M5.Lcd.print(deviceSettings.deviceId.substring(0, 8));
               M5.Lcd.print("...");
-            } else if (deviceSettings.deviceId.length() > 0) {
-              M5.Lcd.setCursor(100, y);
+            } else {
               M5.Lcd.print(deviceSettings.deviceId);
             }
             break;
           case 3: // Display Rotation
-            M5.Lcd.setCursor(100, y);
+            M5.Lcd.print(": ");
             M5.Lcd.print(deviceSettings.rotateDisplay ? "On" : "Off");
             break;
           case 4: // Volume
-            M5.Lcd.setCursor(100, y);
+            M5.Lcd.print(": ");
             M5.Lcd.print(deviceSettings.volume);
             M5.Lcd.print("%");
+            break;
+          case 5: // Invert KVM Pins
+            M5.Lcd.print(": ");
+            M5.Lcd.print(deviceSettings.invertPins ? "Yes" : "No");
             break;
         }
         
@@ -1669,11 +1857,10 @@ void drawMenu() {
     }
   }
   
-  // Отображение подсказок для кнопок внизу экрана
+  // Отображение подсказок для кнопок
   M5.Lcd.drawLine(0, M5.Lcd.height() - 15, M5.Lcd.width(), M5.Lcd.height() - 15, WHITE);
   M5.Lcd.setCursor(5, M5.Lcd.height() - 12);
-  M5.Lcd.setTextSize(1);
-  M5.Lcd.print("A:Select  B:Down  Hold B:Up");
+  M5.Lcd.print("A:Select B:Down C:Up");
 }
 
 // Обработка выбора пункта меню
@@ -1685,21 +1872,20 @@ void handleMenuAction() {
         selectedMenuItem = 0;
         menuStartPosition = 0;
         
-        // Дополнительные действия при переходе в раздел
         if (currentSection == MENU_WIFI_SCAN) {
           scanWiFiNetworks();
         }
       }
       break;
-      
+    
     case MENU_AP_OPTIONS:
-      if (selectedMenuItem >= 0 && selectedMenuItem <= 4) {
-        // Изменение режима AP
-        apConfig.mode = (APMode)selectedMenuItem;
-        updateAccessPointMode();
-      } else if (selectedMenuItem == 5) {
-        // Настройка SSID и пароля - пока просто перейдём в режим редактирования
-        // В реальной реализации здесь будет экран с вводом данных
+      if (selectedMenuItem == 0) {
+        // Переход в меню выбора режима AP
+        currentSection = MENU_AP_MODE_SELECT;
+        selectedMenuItem = (int)apConfig.mode;
+        menuStartPosition = 0;
+      } else if (selectedMenuItem == 1) {
+        // Настройка SSID и пароля
         M5.Lcd.fillScreen(BLACK);
         M5.Lcd.setCursor(0, 0);
         M5.Lcd.println("AP Settings");
@@ -1711,69 +1897,100 @@ void handleMenuAction() {
         M5.Lcd.println("\nUse web interface to change");
         M5.Lcd.println("these settings");
         
-        delay(3000); // Пауза для чтения
-      } else if (selectedMenuItem == 6) {
+        delay(3000);
+      } else if (selectedMenuItem == 2) {
         // Возврат в главное меню
         currentSection = MENU_MAIN;
         selectedMenuItem = 0;
         menuStartPosition = 0;
       }
       break;
-      
-    case MENU_WIFI_SCAN:
-      if (networks.size() > 0 && selectedMenuItem >= 0 && selectedMenuItem < networks.size()) {
-        // Показываем подробную информацию о выбранной сети
-        M5.Lcd.fillScreen(BLACK);
-        M5.Lcd.setCursor(0, 0);
-        M5.Lcd.println("Network Details");
-        M5.Lcd.println("-----------------");
-        
-        M5.Lcd.print("SSID: ");
-        M5.Lcd.println(networks[selectedMenuItem].ssid);
-        
-        M5.Lcd.print("Signal: ");
-        M5.Lcd.print(networks[selectedMenuItem].rssi);
-        M5.Lcd.println(" dBm");
-        
-        M5.Lcd.print("Channel: ");
-        M5.Lcd.println(networks[selectedMenuItem].channel);
-        
-        M5.Lcd.print("Security: ");
-        switch (networks[selectedMenuItem].encryptionType) {
-          case WIFI_AUTH_OPEN:
-            M5.Lcd.println("Open");
-            break;
-          case WIFI_AUTH_WEP:
-            M5.Lcd.println("WEP");
-            break;
-          case WIFI_AUTH_WPA_PSK:
-            M5.Lcd.println("WPA-PSK");
-            break;
-          case WIFI_AUTH_WPA2_PSK:
-            M5.Lcd.println("WPA2-PSK");
-            break;
-          case WIFI_AUTH_WPA_WPA2_PSK:
-            M5.Lcd.println("WPA/WPA2-PSK");
-            break;
-          default:
-            M5.Lcd.println("Unknown");
-        }
-        
-        M5.Lcd.println("\nPress any button to return");
-        
-        // Ждем нажатия любой кнопки для возврата
-        bool buttonPressed = false;
-        while (!buttonPressed) {
-          M5.update();
-          buttonPressed = M5.BtnA.wasPressed() || M5.BtnB.wasPressed();
-          delay(50);
-        }
-      } else {
-        // Если нет сетей или пользователь нажал в пустом месте, запускаем сканирование
-        scanWiFiNetworks();
+    
+    case MENU_AP_MODE_SELECT:
+      if (selectedMenuItem >= 0 && selectedMenuItem < AP_MODE_ITEMS_COUNT - 1) {
+        // Изменение режима AP
+        apConfig.mode = (APMode)selectedMenuItem;
+        updateAccessPointMode();
+        currentSection = MENU_AP_OPTIONS;
+        selectedMenuItem = 0;
+        menuStartPosition = 0;
+      } else if (selectedMenuItem == AP_MODE_ITEMS_COUNT - 1) {
+        // Возврат в меню AP Options
+        currentSection = MENU_AP_OPTIONS;
+        selectedMenuItem = 0;
+        menuStartPosition = 0;
       }
       break;
-      
+    
+    case MENU_WIFI_SCAN:
+      if (!isScanningWifi) {
+        if (networks.size() > 0 && selectedMenuItem >= 0 && selectedMenuItem < networks.size()) {
+          // Показываем подробную информацию о выбранной сети
+          M5.Lcd.fillScreen(BLACK);
+          M5.Lcd.setCursor(0, 0);
+          M5.Lcd.println("Network Details");
+          M5.Lcd.println("-----------------");
+          
+          M5.Lcd.print("SSID: ");
+          M5.Lcd.println(networks[selectedMenuItem].ssid);
+          
+          M5.Lcd.print("Signal: ");
+          M5.Lcd.print(networks[selectedMenuItem].rssi);
+          M5.Lcd.println(" dBm");
+          
+          M5.Lcd.print("Channel: ");
+          M5.Lcd.println(networks[selectedMenuItem].channel);
+          
+          M5.Lcd.print("Security: ");
+          switch (networks[selectedMenuItem].encryptionType) {
+            case WIFI_AUTH_OPEN:
+              M5.Lcd.println("Open");
+              break;
+            case WIFI_AUTH_WEP:
+              M5.Lcd.println("WEP");
+              break;
+            case WIFI_AUTH_WPA_PSK:
+              M5.Lcd.println("WPA-PSK");
+              break;
+            case WIFI_AUTH_WPA2_PSK:
+              M5.Lcd.println("WPA2-PSK");
+              break;
+            case WIFI_AUTH_WPA_WPA2_PSK:
+              M5.Lcd.println("WPA/WPA2-PSK");
+              break;
+            default:
+              M5.Lcd.println("Unknown");
+          }
+          
+          M5.Lcd.println("\nPress any button to return");
+          
+          // Ждем нажатия любой кнопки для возврата
+          while (true) {
+            M5.update();
+            if (M5.BtnA.wasPressed() || M5.BtnB.wasPressed() || M5.BtnC.wasPressed()) {
+              break;
+            }
+            delay(50);
+          }
+        } else {
+          // Запускаем сканирование
+          scanWiFiNetworks();
+        }
+      }
+      break;
+    
+    case MENU_WIFI_SAVED:
+      if (selectedMenuItem < savedNetworks.size()) {
+        // Подключаемся к выбранной сети
+        connectToSavedNetwork(selectedMenuItem);
+      } else {
+        // Возврат в главное меню
+        currentSection = MENU_MAIN;
+        selectedMenuItem = 0;
+        menuStartPosition = 0;
+      }
+      break;
+    
     case MENU_KVM_OPTIONS: {
       const auto& pins = kvmModule.getPins();
       if (selectedMenuItem >= 0 && selectedMenuItem < pins.size()) {
@@ -1795,50 +2012,35 @@ void handleMenuAction() {
       }
       break;
     }
-      
-    case MENU_KVM_MONITOR:
-      // В режиме мониторинга кнопка A отвечает за переключение состояния пина
-      {
-        const auto& kvmPins = kvmModule.getPins();
-        // Вычисляем реальный индекс пина с учетом прокрутки
-        int pinOffset = (menuStartPosition > 0) ? menuStartPosition - 3 : 0;
-        if (pinOffset < 0) pinOffset = 0;
-        int pinIndex = selectedMenuItem - (menuStartPosition > 0 ? 3 : 0) + pinOffset;
-        
-        if (pinIndex >= 0 && pinIndex < kvmPins.size()) {
-          // Переключаем пин
-          kvmModule.togglePin(pinIndex);
-        } else {
-          // Если нажатие не на пин, то возвращаемся в главное меню
-          currentSection = MENU_MAIN;
-          selectedMenuItem = 0;
-          menuStartPosition = 0;
-        }
+    
+    case MENU_KVM_MONITOR: {
+      const auto& kvmPins = kvmModule.getPins();
+      if (selectedMenuItem >= 2 && selectedMenuItem < 2 + kvmPins.size()) {
+        // Переключаем пин
+        kvmModule.togglePin(selectedMenuItem - 2);
       }
       break;
-      
+    }
+    
     case MENU_IR_CONTROL:
-      // Возврат в главное меню при нажатии на любом элементе
+      // Возврат в главное меню
       currentSection = MENU_MAIN;
       selectedMenuItem = 0;
       menuStartPosition = 0;
       break;
-      
+    
     case MENU_DEVICE_SETTINGS:
       if (selectedMenuItem == 0) {
-        // Brightness - изменение яркости по циклу
-        // Изменяем яркость по шагам 20%
+        // Brightness
         deviceSettings.brightness = (deviceSettings.brightness + 20) % 120;
         if (deviceSettings.brightness > 100) deviceSettings.brightness = 20;
         M5.Lcd.setBrightness(deviceSettings.brightness);
         saveDeviceSettings();
       } else if (selectedMenuItem == 1) {
-        // Sleep Timeout - изменение таймаута сна
-        // Цикл значений: 0 (выкл), 30, 60, 120, 300, 600 (10 мин)
+        // Sleep Timeout
         int timeouts[] = {0, 30, 60, 120, 300, 600};
         int currentIndex = 0;
         
-        // Находим текущий индекс
         for (int i = 0; i < 6; i++) {
           if (deviceSettings.sleepTimeout == timeouts[i]) {
             currentIndex = i;
@@ -1846,12 +2048,11 @@ void handleMenuAction() {
           }
         }
         
-        // Переходим к следующему значению
         currentIndex = (currentIndex + 1) % 6;
         deviceSettings.sleepTimeout = timeouts[currentIndex];
         saveDeviceSettings();
       } else if (selectedMenuItem == 2) {
-        // Device ID - просмотр и копирование ID (нельзя изменить с экрана)
+        // Device ID
         M5.Lcd.fillScreen(BLACK);
         M5.Lcd.setCursor(0, 0);
         M5.Lcd.println("Device ID");
@@ -1860,25 +2061,37 @@ void handleMenuAction() {
         M5.Lcd.println("\nUse web interface to change");
         M5.Lcd.println("Device ID");
         
-        delay(3000); // Пауза для чтения
+        delay(3000);
       } else if (selectedMenuItem == 3) {
-        // Display Rotation - переключение ориентации экрана
+        // Display Rotation
         deviceSettings.rotateDisplay = !deviceSettings.rotateDisplay;
         M5.Lcd.setRotation(deviceSettings.rotateDisplay ? 1 : 3);
         saveDeviceSettings();
       } else if (selectedMenuItem == 4) {
-        // Volume - изменение громкости по циклу
-        // Изменяем громкость по шагам 20%
+        // Volume
         deviceSettings.volume = (deviceSettings.volume + 20) % 120;
         if (deviceSettings.volume > 100) deviceSettings.volume = 0;
         saveDeviceSettings();
         
-        // Воспроизведём тестовый звук если громкость не нулевая
+        // Воспроизводим тестовый звук
         if (deviceSettings.volume > 0) {
-          M5.Speaker.setVolume(map(deviceSettings.volume, 0, 100, 0, 255));
+          uint8_t targetVolume = map(deviceSettings.volume, 0, 100, 0, 255);
+          M5.Speaker.setVolume(targetVolume);
           M5.Speaker.tone(1000, 100);
+          delay(100);
+          M5.Speaker.stop();
         }
       } else if (selectedMenuItem == 5) {
+        // Invert KVM Pins
+        deviceSettings.invertPins = !deviceSettings.invertPins;
+        saveDeviceSettings();
+        
+        // Обновляем состояние всех пинов
+        const auto& pins = kvmModule.getPins();
+        for (int i = 0; i < pins.size(); i++) {
+          kvmModule.setPin(i, pins[i].state);
+        }
+      } else if (selectedMenuItem == 6) {
         // Back to Main Menu
         currentSection = MENU_MAIN;
         selectedMenuItem = 0;
@@ -1891,204 +2104,24 @@ void handleMenuAction() {
   drawMenu();
 }
 
-void startWiFiScanAsync() {
-  if (isScanningWifi) {
-    Serial.println("Сканирование уже выполняется, пропускаем");
-    return;
-  }
-  
-  // Очищаем предыдущие результаты
-  networks.clear();
-  scanResultsReady = false;
-  isScanningWifi = true;
-  
-  Serial.println("Запуск асинхронного сканирования WiFi...");
-  WiFi.scanNetworks(true); // Асинхронное сканирование
-  lastScanTime = millis();
-}
-
-void checkScanResults() {
-  if (!isScanningWifi || scanResultsReady) {
-    return; // Сканирование не запущено или результаты уже обработаны
-  }
-  
-  int scanStatus = WiFi.scanComplete();
-  
-  // Таймаут сканирования (15 секунд)
-  if (scanStatus == WIFI_SCAN_RUNNING && (millis() - lastScanTime > 15000)) {
-    Serial.println("Таймаут сканирования WiFi");
-    WiFi.scanDelete();
-    isScanningWifi = false;
-    return;
-  }
-  
-  // Сканирование завершено
-  if (scanStatus >= 0) {
-    Serial.printf("Сканирование завершено, найдено %d сетей\n", scanStatus);
-    
-    // Ограничиваем количество сетей для предотвращения проблем с памятью
-    int networksToProcess = min(scanStatus, 30);
-    
-    for (int i = 0; i < networksToProcess; i++) {
-      // Даем возможность процессору обработать фоновые задачи
-      if (i % 3 == 0) yield();
-      
-      WiFiResult network;
-      network.ssid = WiFi.SSID(i);
-      network.rssi = WiFi.RSSI(i);
-      network.encryptionType = WiFi.encryptionType(i);
-      network.channel = WiFi.channel(i);
-      networks.push_back(network);
-    }
-    
-    // Освобождаем память, выделенную для результатов сканирования
-    WiFi.scanDelete();
-    
-    // Сортируем по уровню сигнала, если у нас есть сети
-    if (!networks.empty()) {
-      std::sort(networks.begin(), networks.end(), [](const WiFiResult& a, const WiFiResult& b) {
-        return a.rssi > b.rssi;
-      });
-    }
-    
-    scanResultsReady = true;
-    isScanningWifi = false;
-    Serial.println("Результаты сканирования обработаны и готовы");
-  }
-}
-
-bool scanWiFiNetworksForWeb() {
-  // Проверяем, не выполняется ли уже сканирование
-  if (isScanningWifi) {
-    Serial.println("Сканирование WiFi уже выполняется, пропускаем");
-    return false;
-  }
-  
-  isScanningWifi = true;
-  Serial.println("Начинаем сканирование WiFi сетей...");
-  
-  // Очищаем предыдущие результаты
-  networks.clear();
-  
-  // Запускаем сканирование с таймаутом
-  int scanCount = WiFi.scanNetworks(false, true, false, 300);  // false=не блокировать, true=показывать скрытые, 300ms на канал
-  
-  if (scanCount == WIFI_SCAN_RUNNING) {
-    Serial.println("Сканирование запущено асинхронно");
-    // Даем немного времени для начала сканирования, чтобы не перегружать CPU
-    delay(100);
-    
-    // Ждем результата сканирования с таймаутом
-    unsigned long startTime = millis();
-    int numNetworks = WIFI_SCAN_RUNNING;
-    
-    while (numNetworks == WIFI_SCAN_RUNNING && (millis() - startTime < 10000)) {
-      delay(100);  // Небольшая задержка между проверками
-      numNetworks = WiFi.scanComplete();
-      yield();  // Позволяет обработать фоновые задачи, чтобы избежать срабатывания WDT
-    }
-    
-    scanCount = numNetworks;
-  }
-  
-  // Проверяем результат сканирования
-  if (scanCount < 0) {
-    Serial.println("Ошибка сканирования WiFi: " + String(scanCount));
-    isScanningWifi = false;
-    return false;
-  }
-  
-  Serial.print("Найдено сетей: ");
-  Serial.println(scanCount);
-  
-  // Ограничиваем количество сетей для предотвращения проблем с памятью
-  const int MAX_NETWORKS = 20;
-  int networksToProcess = min(scanCount, MAX_NETWORKS);
-  
-  // Сохраняем результаты сканирования
-  for (int i = 0; i < networksToProcess; i++) {
-    // Даем возможность процессору обработать фоновые задачи
-    if (i % 5 == 0) {
-      yield();
-    }
-    
-    WiFiResult network;
-    network.ssid = WiFi.SSID(i);
-    network.rssi = WiFi.RSSI(i);
-    network.encryptionType = WiFi.encryptionType(i);
-    network.channel = WiFi.channel(i);
-    networks.push_back(network);
-    
-    Serial.print(i + 1);
-    Serial.print(": ");
-    Serial.print(network.ssid);
-    Serial.print(" (");
-    Serial.print(network.rssi);
-    Serial.println(" dBm)");
-  }
-  
-  // Освобождаем память, выделенную для результатов сканирования
-  WiFi.scanDelete();
-  
-  // Сортируем по уровню сигнала, если у нас есть сети
-  if (!networks.empty()) {
-    std::sort(networks.begin(), networks.end(), [](const WiFiResult& a, const WiFiResult& b) {
-      return a.rssi > b.rssi;
-    });
-  }
-  
-  Serial.println("Сканирование WiFi завершено");
-  isScanningWifi = false;
-  return true;
-}
-
 // Сканирование WiFi сетей
 void scanWiFiNetworks() {
   M5.Lcd.fillScreen(BLACK);
   M5.Lcd.setCursor(0, 0);
   M5.Lcd.println("Scanning WiFi...");
   
-  int scanCount = WiFi.scanNetworks();
-  
   networks.clear();
+  isScanningWifi = true;
+  drawMenu(); // Перерисовываем меню со статусом сканирования
   
-  if (scanCount == 0) {
-    M5.Lcd.println("No networks found");
-  } else {
-    M5.Lcd.print("Found ");
-    M5.Lcd.print(scanCount);
-    M5.Lcd.println(" networks");
-    
-    // Сохраняем результаты сканирования
-    for (int i = 0; i < scanCount; i++) {
-      WiFiResult network;
-      network.ssid = WiFi.SSID(i);
-      network.rssi = WiFi.RSSI(i);
-      network.encryptionType = WiFi.encryptionType(i);
-      network.channel = WiFi.channel(i);
-      networks.push_back(network);
-    }
-    
-    // Сортируем по уровню сигнала
-    std::sort(networks.begin(), networks.end(), [](const WiFiResult& a, const WiFiResult& b) {
-      return a.rssi > b.rssi;
-    });
-  }
+  WiFi.scanNetworks(true); // Запускаем асинхронное сканирование
   
-  selectedMenuItem = 0;
-  menuStartPosition = 0;
-  
-  // Небольшая задержка для чтения
-  delay(1000);
-  
-  // Перерисовываем меню с результатами
-  drawMenu();
+  // В основном цикле нужно будет проверять состояние сканирования
+  // и обновлять меню когда сканирование завершится
 }
 
 // Выполнение диагностики сети
 void performNetworkDiagnostics() {
-  // Здесь можно добавить дополнительные проверки сети
-  // Пока просто обновляем информацию, которая уже собирается
   deviceManager.updateNetworkInfo();
 }
 
@@ -2158,6 +2191,7 @@ void saveDeviceSettings() {
   doc["deviceId"] = deviceSettings.deviceId;
   doc["rotateDisplay"] = deviceSettings.rotateDisplay;
   doc["volume"] = deviceSettings.volume;
+  doc["invertPins"] = deviceSettings.invertPins;
   
   // Открываем файл для записи
   File configFile = LittleFS.open("/device_settings.json", "w");
@@ -2209,5 +2243,63 @@ void loadDeviceSettings() {
   }
   if (doc.containsKey("volume")) {
     deviceSettings.volume = doc["volume"];
+  }
+  if (doc.containsKey("invertPins")) {
+    deviceSettings.invertPins = doc["invertPins"];
+  }
+  
+  // Синхронизируем глобальные настройки
+  globalDeviceSettings = deviceSettings;
+}
+
+// Сохранение списка сохраненных сетей
+void saveSavedNetworks() {
+  DynamicJsonDocument doc(4096);
+  
+  JsonArray networksArray = doc.createNestedArray("networks");
+  for (const auto& network : savedNetworks) {
+    JsonObject netObj = networksArray.createNestedObject();
+    netObj["ssid"] = network.ssid;
+    netObj["password"] = network.password;
+  }
+  
+  File configFile = LittleFS.open("/saved_networks.json", "w");
+  if (!configFile) {
+    return;
+  }
+  
+  serializeJson(doc, configFile);
+  configFile.close();
+}
+
+// Загрузка списка сохраненных сетей
+void loadSavedNetworks() {
+  if (!LittleFS.exists("/saved_networks.json")) {
+    return;
+  }
+  
+  File configFile = LittleFS.open("/saved_networks.json", "r");
+  if (!configFile) {
+    return;
+  }
+  
+  DynamicJsonDocument doc(4096);
+  DeserializationError error = deserializeJson(doc, configFile);
+  configFile.close();
+  
+  if (error) {
+    return;
+  }
+  
+  savedNetworks.clear();
+  
+  if (doc.containsKey("networks")) {
+    JsonArray networksArray = doc["networks"];
+    for (JsonObject netObj : networksArray) {
+      SavedNetwork network;
+      network.ssid = netObj["ssid"].as<String>();
+      network.password = netObj["password"].as<String>();
+      savedNetworks.push_back(network);
+    }
   }
 }
