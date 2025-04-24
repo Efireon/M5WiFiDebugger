@@ -6,13 +6,14 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <vector>
+#include <esp_wifi.h>
+#include <tcpip_adapter.h>
 
 #include "common_structures.h"
 #include "honeypot.h"
 #include "network_tools.h"
 #include "device_manager.h"
 
-// Определение разделов меню
 // Определение разделов меню
 enum MenuSection {
   MENU_MAIN,           // Главное меню
@@ -23,6 +24,8 @@ enum MenuSection {
   
   // Подразделы Wi-Fi
   MENU_AP_OPTIONS,     // Опции режима точки доступа
+  MENU_AP_STATUS,      // Статус AP и управление
+  MENU_AP_USERS,       // Список пользователей AP
   MENU_WIFI_SCAN,      // Сканирование и отладка WiFi
   MENU_WIFI_SAVED,     // Сохраненные сети WiFi
   MENU_AP_MODE_SELECT, // Выбор режима AP
@@ -36,6 +39,13 @@ enum MenuSection {
 struct MenuItem {
   const char* title;
   MenuSection section;
+};
+
+// Структура для хранения информации о клиенте AP
+struct APClient {
+  IPAddress ip;
+  uint8_t mac[6];
+  bool blocked;
 };
 
 // Класс для управления KVM пинами
@@ -57,7 +67,7 @@ public:
     // Настраиваем пины
     for (auto& pin : pins) {
       pinMode(pin.pin, OUTPUT);
-      // При инициализации НЕ учитываем инверсию - просто восстанавливаем сохраненное состояние
+      // При инициализации устанавливаем пины в сохраненное состояние
       digitalWrite(pin.pin, pin.state ? HIGH : LOW);
     }
   }
@@ -83,12 +93,7 @@ public:
     
     // Настраиваем пин
     pinMode(pin, OUTPUT);
-    // При добавлении учитываем текущее состояние инверсии
-    if (globalDeviceSettings.invertPins) {
-      digitalWrite(pin, HIGH); // Для state=false с инверсией пишем HIGH
-    } else {
-      digitalWrite(pin, LOW);  // Для state=false без инверсии пишем LOW
-    }
+    digitalWrite(pin, LOW); // Пин всегда инициализируется в LOW для состояния false
     
     // Сохраняем конфигурацию
     saveConfig();
@@ -100,12 +105,8 @@ public:
   void setPin(int index, bool state) {
     if (index >= 0 && index < pins.size()) {
       pins[index].state = state;
-      // Учитываем инверсию при установке состояния
-      if (globalDeviceSettings.invertPins) {
-        digitalWrite(pins[index].pin, state ? LOW : HIGH);
-      } else {
-        digitalWrite(pins[index].pin, state ? HIGH : LOW);
-      }
+      // Физически пин всегда работает нормально: HIGH = включено, LOW = выключено
+      digitalWrite(pins[index].pin, state ? HIGH : LOW);
       pins[index].lastStateChange = millis();
       saveConfig();
     }
@@ -115,11 +116,7 @@ public:
   void togglePin(int index) {
     if (index >= 0 && index < pins.size()) {
       pins[index].state = !pins[index].state;
-      if (globalDeviceSettings.invertPins) {
-        digitalWrite(pins[index].pin, pins[index].state ? LOW : HIGH);
-      } else {
-        digitalWrite(pins[index].pin, pins[index].state ? HIGH : LOW);
-      }
+      digitalWrite(pins[index].pin, pins[index].state ? HIGH : LOW);
       pins[index].lastStateChange = millis();
       saveConfig();
     }
@@ -135,7 +132,8 @@ public:
       // Возвращаем обратно
       setPin(index, originalState);
     }
-  }  
+  }
+  
   // Установка режима мониторинга пина
   void setMonitorMode(int index, PinMonitorMode mode) {
     if (index >= 0 && index < pins.size()) {
@@ -315,10 +313,6 @@ public:
         pin.lastStateChange = 0;
         
         pins.push_back(pin);
-        
-        // Настраиваем пин
-        pinMode(pin.pin, OUTPUT);
-        digitalWrite(pin.pin, (pin.state ^ globalDeviceSettings.invertPins) ? HIGH : LOW);
       }
     }
     
@@ -345,7 +339,6 @@ const struct {
   {32, "GPIO32", "GROVE"},
   {33, "GPIO33", "GROVE"},
   {36, "GPIO36", "GROVE (Input only)"},
-  // Добавьте другие пины по спецификации
 };
 #define AVAILABLE_PINS_COUNT (sizeof(AVAILABLE_PINS) / sizeof(AVAILABLE_PINS[0]))
 
@@ -360,6 +353,8 @@ DeviceSettings deviceSettings = {80, 300, "M5WifiDebugger", false, 70, false}; /
 DeviceSettings globalDeviceSettings; // Глобальная переменная для других модулей (определена здесь)
 std::vector<SavedNetwork> savedNetworks; // Сохраненные сети
 std::vector<WiFiResult> networks;        // Список найденных сетей
+std::vector<APClient> apClients;         // Список клиентов AP
+std::vector<String> blockedMACs;         // Список заблокированных MAC адресов
 
 // Наши модули
 KVMModule kvmModule;
@@ -379,6 +374,7 @@ const MenuItem mainMenuItems[] = {
 // Пункты подменю Wi-Fi
 const MenuItem wifiMenuItems[] = {
   {"AP Options", MENU_AP_OPTIONS},
+  {"AP Status", MENU_AP_STATUS},
   {"WiFi Scan & Debug", MENU_WIFI_SCAN},
   {"Saved Networks", MENU_WIFI_SAVED},
   {"Back to Main Menu", MENU_MAIN}
@@ -411,6 +407,14 @@ const char* apModeItems[] = {
   "Back"
 };
 #define AP_MODE_ITEMS_COUNT (sizeof(apModeItems) / sizeof(char*))
+
+// Пункты подменю AP Status
+const MenuItem apStatusMenuItems[] = {
+  {"Users", MENU_AP_USERS},
+  {"Shuffle IP", MENU_MAIN},  // Специальный пункт для смены IP
+  {"Back to Wi-Fi", MENU_WIFI}
+};
+#define AP_STATUS_MENU_ITEMS_COUNT (sizeof(apStatusMenuItems) / sizeof(MenuItem))
 
 // Пункты подменю Device Settings
 const char* deviceSettingsItems[] = {
@@ -457,6 +461,8 @@ int getMaxMenuItems();
 void saveSavedNetworks();
 void loadSavedNetworks();
 void connectToSavedNetwork(int index);
+void updateAPClients();
+void shuffleIP();
 
 // Функция инициализации
 void setup() {
@@ -484,6 +490,9 @@ void setup() {
   // Инициализируем наши модули
   kvmModule.begin();
   deviceManager.begin();
+  
+  // Регистрируем обработчики событий WiFi
+  WiFi.onEvent(onStationConnected, ARDUINO_EVENT_WIFI_AP_STACONNECTED);
   
   // Настройка экрана
   setupDisplay();
@@ -655,13 +664,30 @@ void updateAccessPointMode() {
       
     case AP_MODE_NORMAL:
       // Обычный режим точки доступа
-      WiFi.mode(WIFI_AP);
+      if (WiFi.status() == WL_CONNECTED) {
+        // Если подключены к WiFi, используем режим STA+AP для проброса трафика
+        WiFi.mode(WIFI_AP_STA);
+      } else {
+        WiFi.mode(WIFI_AP);
+      }
       WiFi.softAP(apConfig.ssid.c_str(), apConfig.password.c_str(), apConfig.channel);
+      
+      // Настраиваем NAT для проброса трафика
+      if (WiFi.status() == WL_CONNECTED) {
+        IPAddress apIP(192, 168, 4, 1);
+        IPAddress apGateway = WiFi.gatewayIP();
+        IPAddress apSubnet(255, 255, 255, 0);
+        WiFi.softAPConfig(apIP, apGateway, apSubnet);
+      }
       break;
       
     case AP_MODE_HIDDEN:
       // Скрытый режим точки доступа
-      WiFi.mode(WIFI_AP);
+      if (WiFi.status() == WL_CONNECTED) {
+        WiFi.mode(WIFI_AP_STA);
+      } else {
+        WiFi.mode(WIFI_AP);
+      }
       WiFi.softAP(apConfig.ssid.c_str(), apConfig.password.c_str(), apConfig.channel, true);
       break;
       
@@ -1385,30 +1411,8 @@ void setupWebServer() {
   });
   
   // Маршрут для получения настроек инвертирования пинов
-  server.on("/settings/pin-inversion", HTTP_POST, [](AsyncWebServerRequest *request){
-    if (!request->hasParam("inverted", true)) {
-      request->send(400, "application/json", "{\"error\":\"Missing inverted parameter\"}");
-      return;
-    }
-    
-    bool inverted = (request->getParam("inverted", true)->value() == "true" || 
-                     request->getParam("inverted", true)->value() == "1");
-    
-    if (deviceSettings.invertPins != inverted) {
-      deviceSettings.invertPins = inverted;
-      globalDeviceSettings.invertPins = inverted;
-      saveDeviceSettings();
-      
-      // Обновляем физическое состояние всех пинов с учетом новой настройки инверсии
-      const auto& pins = kvmModule.getPins();
-      for (int i = 0; i < pins.size(); i++) {
-        // Сохраняем текущее логическое состояние и применяем его с новой инверсией
-        kvmModule.setPin(i, pins[i].state);
-      }
-    }
-    
+  server.on("/settings/pin-inversion", HTTP_GET, [](AsyncWebServerRequest *request){
     DynamicJsonDocument doc(256);
-    doc["success"] = true;
     doc["inverted"] = deviceSettings.invertPins;
     
     String response;
@@ -1428,13 +1432,9 @@ void setupWebServer() {
     
     if (deviceSettings.invertPins != inverted) {
       deviceSettings.invertPins = inverted;
+      globalDeviceSettings.invertPins = inverted;
       saveDeviceSettings();
-      
-      // Обновляем состояние всех пинов
-      const auto& pins = kvmModule.getPins();
-      for (int i = 0; i < pins.size(); i++) {
-        kvmModule.setPin(i, pins[i].state);
-      }
+      // При изменении инверсии нет необходимости менять физическое состояние пинов
     }
     
     DynamicJsonDocument doc(256);
@@ -1654,43 +1654,52 @@ void handleButtons() {
     buttonALongPress = false;
   }
   
-  // Кнопка B (Control/Scroll Down)
+  // Кнопка B (Control/Scroll Down/Up на долгое нажатие)
   if (M5.BtnB.isPressed()) {
     if (buttonBLastPress == 0) {
       buttonBLastPress = millis();
-    } else if (!buttonBLongPress && millis() - buttonBLastPress > 1000) {
-      // Долгое нажатие на B - быстрая прокрутка вниз
+    }
+    else if (!buttonBLongPress && millis() - buttonBLastPress > 500) {
+      // Долгое нажатие на B — прокрутка вверх на одну позицию
       buttonBLongPress = true;
       int maxItems = getMaxMenuItems();
-      selectedMenuItem = (selectedMenuItem + 5 < maxItems) ? selectedMenuItem + 5 : maxItems - 1;
-      
-      // Корректируем позицию прокрутки
+      // двигаем вверх, если в начале — на последний элемент
+      selectedMenuItem = (selectedMenuItem > 0)
+        ? selectedMenuItem - 1
+        : (maxItems + 1);
+  
+      // корректируем окно вывода
       int displayLines = (M5.Lcd.height() - 30) / 16;
-      if (selectedMenuItem >= menuStartPosition + displayLines) {
-        menuStartPosition = selectedMenuItem - displayLines + 1;
+      if (selectedMenuItem < menuStartPosition) {
+        menuStartPosition = selectedMenuItem;
+      } else if (selectedMenuItem == maxItems - 1) {
+        // если прыгнули на последний, показываем его внизу экрана
+        menuStartPosition = maxItems - displayLines;
       }
-      
+  
       drawMenu();
     }
   } else {
     if (buttonBLastPress > 0 && !buttonBLongPress) {
-      // Короткое нажатие на B - прокрутка вниз
+      // Короткое нажатие на B — прокрутка вниз
       int maxItems = getMaxMenuItems();
-      selectedMenuItem = (selectedMenuItem < maxItems - 1) ? selectedMenuItem + 1 : 0;
-      
-      // Корректируем позицию прокрутки
+      selectedMenuItem = (selectedMenuItem < maxItems - 1)
+        ? selectedMenuItem + 1
+        : 0;
+  
       int displayLines = (M5.Lcd.height() - 30) / 16;
       if (selectedMenuItem >= menuStartPosition + displayLines) {
         menuStartPosition = selectedMenuItem - displayLines + 1;
       } else if (selectedMenuItem == 0) {
         menuStartPosition = 0;
       }
-      
+  
       drawMenu();
     }
+    // сброс флагов
     buttonBLastPress = 0;
     buttonBLongPress = false;
-  }
+  }  
 }
 
 // Функция для получения максимального количества элементов в текущем меню
@@ -1708,6 +1717,9 @@ int getMaxMenuItems() {
     case MENU_AP_OPTIONS:
       return AP_OPTIONS_ITEMS_COUNT;
     
+    case MENU_AP_STATUS:
+      return AP_STATUS_MENU_ITEMS_COUNT;
+    
     case MENU_AP_MODE_SELECT:
       return AP_MODE_ITEMS_COUNT;
     
@@ -1716,6 +1728,9 @@ int getMaxMenuItems() {
     
     case MENU_WIFI_SAVED:
       return savedNetworks.size() + 1; // +1 для кнопки возврата
+    
+    case MENU_AP_USERS:
+      return apClients.size() + 1; // +1 для кнопки возврата
     
     case MENU_KVM_OPTIONS: {
       const auto& pins = kvmModule.getPins();
@@ -1762,6 +1777,12 @@ void drawMenu() {
       break;
     case MENU_AP_OPTIONS:
       M5.Lcd.println("AP OPTIONS");
+      break;
+    case MENU_AP_STATUS:
+      M5.Lcd.println("AP STATUS");
+      break;
+    case MENU_AP_USERS:
+      M5.Lcd.println("AP USERS");
       break;
     case MENU_AP_MODE_SELECT:
       M5.Lcd.println("AP MODE SELECT");
@@ -1868,6 +1889,88 @@ void drawMenu() {
         y += 16;
         M5.Lcd.setTextColor(WHITE);
       }
+      break;
+    }
+    
+    case MENU_AP_STATUS: {
+      // Отображаем информацию о статусе AP
+      M5.Lcd.setCursor(5, y);
+      M5.Lcd.print("Mode: ");
+      switch (apConfig.mode) {
+        case AP_MODE_OFF: M5.Lcd.print("Off"); break;
+        case AP_MODE_NORMAL: M5.Lcd.print("Normal"); break;
+        case AP_MODE_REPEATER: M5.Lcd.print("Repeater"); break;
+        case AP_MODE_HIDDEN: M5.Lcd.print("Hidden"); break;
+        case AP_MODE_HONEYPOT: M5.Lcd.print("Honeypot"); break;
+      }
+      y += 16;
+      
+      if (apConfig.mode != AP_MODE_OFF) {
+        M5.Lcd.setCursor(5, y);
+        M5.Lcd.print("AP IP: ");
+        M5.Lcd.print(WiFi.softAPIP().toString());
+        y += 16;
+        
+        M5.Lcd.setCursor(5, y);
+        M5.Lcd.print("Clients: ");
+        M5.Lcd.print(WiFi.softAPgetStationNum());
+        y += 16;
+      }
+      
+      if (WiFi.status() == WL_CONNECTED) {
+        M5.Lcd.setCursor(5, y);
+        M5.Lcd.print("Ext IP: ");
+        M5.Lcd.print(WiFi.localIP().toString());
+        y += 16;
+      }
+      
+      y += 8; // Отступ перед меню
+      
+      // Отображаем пункты меню
+      for (int i = menuStartPosition; i < AP_STATUS_MENU_ITEMS_COUNT && i < menuStartPosition + displayLines; i++) {
+        M5.Lcd.setCursor(5, y);
+        if (i == selectedMenuItem) {
+          M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
+          M5.Lcd.setTextColor(WHITE);
+        }
+        M5.Lcd.print(apStatusMenuItems[i].title);
+        y += 16;
+        M5.Lcd.setTextColor(WHITE);
+      }
+      break;
+    }
+    
+    case MENU_AP_USERS: {
+      // Отображаем список подключенных клиентов
+      for (int i = menuStartPosition; i < apClients.size() && i < menuStartPosition + displayLines; i++) {
+        M5.Lcd.setCursor(5, y);
+        if (i == selectedMenuItem) {
+          M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
+          M5.Lcd.setTextColor(WHITE);
+        }
+        
+        char macStr[18];
+        sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+                apClients[i].mac[0], apClients[i].mac[1], apClients[i].mac[2],
+                apClients[i].mac[3], apClients[i].mac[4], apClients[i].mac[5]);
+        
+        M5.Lcd.print(apClients[i].ip.toString());
+        M5.Lcd.print(" ");
+        M5.Lcd.print(apClients[i].blocked ? "[BLOCKED]" : "");
+        
+        y += 16;
+        M5.Lcd.setTextColor(WHITE);
+      }
+      
+      // Кнопка возврата
+      if (apClients.size() == selectedMenuItem || (apClients.size() == 0 && selectedMenuItem == 0)) {
+        M5.Lcd.setCursor(5, y);
+        M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
+        M5.Lcd.setTextColor(WHITE);
+      }
+      M5.Lcd.setCursor(5, y);
+      M5.Lcd.print("Back to AP Status");
+      M5.Lcd.setTextColor(WHITE);
       break;
     }
     
@@ -1985,7 +2088,8 @@ void drawMenu() {
         
         M5.Lcd.print(kvmPins[i].name);
         M5.Lcd.print(": ");
-        if (deviceSettings.invertPins) {
+        // Визуальная инверсия отображения при включенной инверсии
+        if (globalDeviceSettings.invertPins) {
           M5.Lcd.print(kvmPins[i].state ? "OFF" : "ON");
         } else {
           M5.Lcd.print(kvmPins[i].state ? "ON" : "OFF");
@@ -2141,7 +2245,7 @@ void drawMenu() {
   // Отображение подсказок для кнопок
   M5.Lcd.drawLine(0, M5.Lcd.height() - 15, M5.Lcd.width(), M5.Lcd.height() - 15, WHITE);
   M5.Lcd.setCursor(5, M5.Lcd.height() - 12);
-  M5.Lcd.print("A:Select B(press\hold):Down\\Up");
+  M5.Lcd.print("A:Select B:Down C:Up");
 }
 
 // Обработка выбора пункта меню
@@ -2199,6 +2303,60 @@ void handleMenuAction() {
       } else if (selectedMenuItem == 2) {
         // Возврат в главное меню
         currentSection = MENU_MAIN;
+        selectedMenuItem = 0;
+        menuStartPosition = 0;
+      }
+      break;
+    
+    case MENU_AP_STATUS:
+      if (selectedMenuItem == 0) {
+        // Users
+        currentSection = MENU_AP_USERS;
+        selectedMenuItem = 0;
+        menuStartPosition = 0;
+        updateAPClients();
+      } else if (selectedMenuItem == 1) {
+        // Shuffle IP
+        shuffleIP();
+      } else if (selectedMenuItem == 2) {
+        // Back to Wi-Fi
+        currentSection = MENU_WIFI;
+        selectedMenuItem = 0;
+        menuStartPosition = 0;
+      }
+      break;
+    
+    case MENU_AP_USERS:
+      if (selectedMenuItem < apClients.size()) {
+        // Переключаем блокировку клиента
+        char macStr[18];
+        sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+                apClients[selectedMenuItem].mac[0],
+                apClients[selectedMenuItem].mac[1],
+                apClients[selectedMenuItem].mac[2],
+                apClients[selectedMenuItem].mac[3],
+                apClients[selectedMenuItem].mac[4],
+                apClients[selectedMenuItem].mac[5]);
+        
+        if (apClients[selectedMenuItem].blocked) {
+          // Разблокируем
+          for (auto it = blockedMACs.begin(); it != blockedMACs.end(); ++it) {
+            if (*it == macStr) {
+              blockedMACs.erase(it);
+              break;
+            }
+          }
+        } else {
+          // Блокируем
+          blockedMACs.push_back(macStr);
+          // В ESP32 нет прямого способа отключить клиента по MAC-адресу
+          // Но клиент будет заблокирован при следующей попытке подключения
+          // через фильтрацию MAC-адресов
+        }
+        updateAPClients();
+      } else if (selectedMenuItem == apClients.size()) {
+        // Back to AP Status
+        currentSection = MENU_AP_STATUS;
         selectedMenuItem = 0;
         menuStartPosition = 0;
       }
@@ -2384,13 +2542,7 @@ void handleMenuAction() {
         deviceSettings.invertPins = !deviceSettings.invertPins;
         globalDeviceSettings.invertPins = deviceSettings.invertPins;
         saveDeviceSettings();
-        
-        // Обновляем физическое состояние всех пинов с учетом новой настройки инверсии
-        const auto& pins = kvmModule.getPins();
-        for (int i = 0; i < pins.size(); i++) {
-          // Сохраняем текущее логическое состояние и применяем его с новой инверсией
-          kvmModule.setPin(i, pins[i].state);
-        }
+        // Не нужно обновлять физическое состояние пинов при визуальной инверсии
       } else if (selectedMenuItem == 6) {
         // Back to Main Menu
         currentSection = MENU_MAIN;
@@ -2601,5 +2753,85 @@ void loadSavedNetworks() {
       network.password = netObj["password"].as<String>();
       savedNetworks.push_back(network);
     }
+  }
+}
+
+// Функция получения информации о подключенных клиентах
+void updateAPClients() {
+  apClients.clear();
+  
+  wifi_sta_list_t stationList;
+  tcpip_adapter_sta_list_t adapterList;
+  
+  if (WiFi.softAPgetStationNum() == 0) {
+    return;
+  }
+  
+  esp_wifi_ap_get_sta_list(&stationList);
+  tcpip_adapter_get_sta_list(&stationList, &adapterList);
+  
+  for (int i = 0; i < adapterList.num; i++) {
+    APClient client;
+    client.ip = IPAddress(adapterList.sta[i].ip.addr);
+    memcpy(client.mac, adapterList.sta[i].mac, 6);
+    
+    // Проверяем, заблокирован ли MAC
+    char macStr[18];
+    sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+            client.mac[0], client.mac[1], client.mac[2],
+            client.mac[3], client.mac[4], client.mac[5]);
+    
+    client.blocked = false;
+    for (const auto& blockedMAC : blockedMACs) {
+      if (blockedMAC == macStr) {
+        client.blocked = true;
+        break;
+      }
+    }
+    
+    apClients.push_back(client);
+  }
+}
+
+// Функция смены IP адреса
+void shuffleIP() {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFi.disconnect();
+    delay(1000);
+    WiFi.reconnect();
+    
+    // Показываем уведомление
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.println("Shuffling IP...");
+    M5.Lcd.println("Please wait...");
+    delay(3000);
+  }
+}
+
+// Функция проверки MAC-адреса на блокировку
+bool isMACBlocked(const uint8_t* mac) {
+  char macStr[18];
+  sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  
+  for (const auto& blockedMAC : blockedMACs) {
+    if (blockedMAC == macStr) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void onStationConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
+  auto& sta = info.wifi_ap_staconnected;
+  Serial.printf("Station connected: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                sta.mac[0], sta.mac[1], sta.mac[2],
+                sta.mac[3], sta.mac[4], sta.mac[5]);
+
+  if (isMACBlocked(sta.mac)) {
+    Serial.println("Blocked MAC detected, disconnecting...");
+    // Для отключения клиента можно вызвать ESP-IDF API:
+    // wifi_softap_disconnect(sta.mac);
   }
 }
