@@ -8,6 +8,7 @@
 #include <vector>
 #include <esp_wifi.h>
 #include <tcpip_adapter.h>
+#include <esp_system.h>
 
 #include "common_structures.h"
 #include "honeypot.h"
@@ -26,6 +27,7 @@ enum MenuSection {
   MENU_AP_OPTIONS,     // Опции режима точки доступа
   MENU_AP_STATUS,      // Статус AP и управление
   MENU_AP_USERS,       // Список пользователей AP
+  MENU_AP_USER_INFO,   // Информация о пользователе
   MENU_WIFI_SCAN,      // Сканирование и отладка WiFi
   MENU_WIFI_SAVED,     // Сохраненные сети WiFi
   MENU_AP_MODE_SELECT, // Выбор режима AP
@@ -35,17 +37,36 @@ enum MenuSection {
   MENU_KVM_MONITOR     // Мониторинг KVM
 };
 
-// Структура для пунктов меню
-struct MenuItem {
-  const char* title;
-  MenuSection section;
-};
-
 // Структура для хранения информации о клиенте AP
 struct APClient {
   IPAddress ip;
   uint8_t mac[6];
   bool blocked;
+  unsigned int totalBytes;
+  String lastPacket;
+  unsigned long lastSeen;
+};
+
+// Структура для пунктов меню пользователя AP
+struct APUserMenuItem {
+  const char* title;
+  bool expandable;    // Может быть раскрыт
+  bool expanded;      // Текущее состояние (развернут/свернут)
+  bool action;        // Является ли это действием
+};
+
+APUserMenuItem apUserMenuItems[] = {
+  {"Info", false, true, false},  // Всегда развернут
+  {"Sniff", true, false, true},  // Можно раскрыть
+  {"Block", false, false, true}, // Действие блокировки
+  {"Back", false, false, true}   // Возврат назад
+};
+#define AP_USER_MENU_ITEMS_COUNT (sizeof(apUserMenuItems) / sizeof(APUserMenuItem))
+
+// Структура для пунктов меню
+struct MenuItem {
+  const char* title;
+  MenuSection section;
 };
 
 // Класс для управления KVM пинами
@@ -355,6 +376,10 @@ std::vector<SavedNetwork> savedNetworks; // Сохраненные сети
 std::vector<WiFiResult> networks;        // Список найденных сетей
 std::vector<APClient> apClients;         // Список клиентов AP
 std::vector<String> blockedMACs;         // Список заблокированных MAC адресов
+int selectedAPUser = -1;                 // Выбранный пользователь AP
+bool isSniffing = false;                 // Флаг активного сниффинга
+int currentSniffingClient = -1;          // Текущий клиент для сниффинга
+uint8_t* currentSniffingMAC = nullptr;   // MAC адрес текущего клиента для сниффинга
 
 // Наши модули
 KVMModule kvmModule;
@@ -463,6 +488,11 @@ void loadSavedNetworks();
 void connectToSavedNetwork(int index);
 void updateAPClients();
 void shuffleIP();
+void startPacketSniffing(int clientIndex);
+void stopPacketSniffing();
+void promiscuous_rx_callback(void* buf, wifi_promiscuous_pkt_type_t type);
+bool isMACBlocked(const uint8_t* mac);
+void onStationConnected(WiFiEvent_t event, WiFiEventInfo_t info);
 
 // Функция инициализации
 void setup() {
@@ -587,6 +617,18 @@ void loop() {
     
     if (currentTime - lastUpdateTime > 1000) { // Обновляем раз в секунду
       lastUpdateTime = currentTime;
+      drawMenu();
+    }
+  }
+  
+  // Обновляем информацию о клиентах AP
+  if (currentSection == MENU_AP_USERS || currentSection == MENU_AP_USER_INFO) {
+    static unsigned long lastAPUpdateTime = 0;
+    unsigned long currentTime = millis();
+    
+    if (currentTime - lastAPUpdateTime > 1000) { // Обновляем раз в секунду
+      lastAPUpdateTime = currentTime;
+      updateAPClients();
       drawMenu();
     }
   }
@@ -832,9 +874,10 @@ void setupWebServer() {
       return;
     }
     
+    networks.clear();
     isScanningWifi = true;
     scanResultsReady = false;
-    WiFi.scanNetworks(true); // Асинхронное сканирование
+    WiFi.scanNetworks(true, false, false, 300); // Асинхронное сканирование
     request->send(202, "application/json", "{\"status\":\"started\",\"message\":\"Scan started\"}");
   });
   
@@ -857,8 +900,13 @@ void setupWebServer() {
         scanResultsReady = true;
         request->send(200, "application/json", 
                      "{\"status\":\"ready\",\"message\":\"Scan complete\",\"count\":" + String(networks.size()) + "}");
-      } else {
+      } else if (scanResult == WIFI_SCAN_RUNNING) {
         request->send(200, "application/json", "{\"status\":\"scanning\",\"message\":\"Scanning in progress\"}");
+      } else {
+        // Ошибка сканирования
+        WiFi.scanDelete();
+        isScanningWifi = false;
+        request->send(500, "application/json", "{\"status\":\"error\",\"message\":\"Scan failed\"}");
       }
     } else if (scanResultsReady) {
       request->send(200, "application/json", 
@@ -870,7 +918,7 @@ void setupWebServer() {
   
   // Маршрут для получения результатов сканирования
   server.on("/scan-results", HTTP_GET, [](AsyncWebServerRequest *request){
-    if (!scanResultsReady) {
+    if (!scanResultsReady && networks.size() == 0) {
       request->send(404, "application/json", "{\"error\":\"No scan results available\"}");
       return;
     }
@@ -1598,6 +1646,165 @@ void setupWebServer() {
     request->send(200, "application/json", response);
   });
   
+  // API для работы с пользователями AP
+  server.on("/ap/users", HTTP_GET, [](AsyncWebServerRequest *request){
+    updateAPClients();
+    
+    DynamicJsonDocument doc(4096);
+    JsonArray usersArray = doc.createNestedArray("users");
+    
+    for (const auto& client : apClients) {
+      JsonObject userObj = usersArray.createNestedObject();
+      userObj["ip"] = client.ip.toString();
+      
+      char macStr[18];
+      sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+              client.mac[0], client.mac[1], client.mac[2],
+              client.mac[3], client.mac[4], client.mac[5]);
+      userObj["mac"] = macStr;
+      
+      userObj["blocked"] = client.blocked;
+      userObj["totalBytes"] = client.totalBytes;
+      userObj["lastPacket"] = client.lastPacket;
+      userObj["lastSeen"] = client.lastSeen;
+    }
+    
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+  
+  // API для блокировки/разблокировки пользователя AP
+  server.on("/ap/users/block", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("ip", true)) {
+      request->send(400, "application/json", "{\"error\":\"Missing IP parameter\"}");
+      return;
+    }
+    
+    String ip = request->getParam("ip", true)->value();
+    bool blocked = false;
+    
+    if (request->hasParam("blocked", true)) {
+      blocked = (request->getParam("blocked", true)->value() == "true" || 
+                 request->getParam("blocked", true)->value() == "1");
+    }
+    
+    // Находим клиента по IP
+    for (auto& client : apClients) {
+      if (client.ip.toString() == ip) {
+        char macStr[18];
+        sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+                client.mac[0], client.mac[1], client.mac[2],
+                client.mac[3], client.mac[4], client.mac[5]);
+        
+        if (blocked) {
+          // Блокируем
+          networkTools.blockIP(ip);
+          bool found = false;
+          for (const auto& blockedMAC : blockedMACs) {
+            if (blockedMAC == macStr) {
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            blockedMACs.push_back(macStr);
+          }
+          client.blocked = true;
+        } else {
+          // Разблокируем
+          networkTools.unblockIP(ip);
+          for (auto it = blockedMACs.begin(); it != blockedMACs.end(); ++it) {
+            if (*it == macStr) {
+              blockedMACs.erase(it);
+              break;
+            }
+          }
+          client.blocked = false;
+        }
+        
+        request->send(200, "application/json", "{\"success\":true}");
+        return;
+      }
+    }
+    
+    request->send(404, "application/json", "{\"error\":\"User not found\"}");
+  });
+  
+  // API для получения трафика пользователя
+  server.on("/ap/users/traffic", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("ip")) {
+      request->send(400, "application/json", "{\"error\":\"Missing IP parameter\"}");
+      return;
+    }
+    
+    String ip = request->getParam("ip")->value();
+    
+    // Находим клиента по IP
+    for (const auto& client : apClients) {
+      if (client.ip.toString() == ip) {
+        DynamicJsonDocument doc(1024);
+        doc["ip"] = client.ip.toString();
+        doc["totalBytes"] = client.totalBytes;
+        doc["lastPacket"] = client.lastPacket;
+        doc["lastSeen"] = client.lastSeen;
+        
+        // Если активен сниффинг для этого клиента, добавляем информацию
+        if (isSniffing && currentSniffingClient >= 0 && 
+            apClients[currentSniffingClient].ip == client.ip) {
+          doc["sniffing"] = true;
+          doc["sniffedPackets"] = client.totalBytes; // Обновляется в режиме реального времени
+          doc["lastPacketInfo"] = client.lastPacket;
+        } else {
+          doc["sniffing"] = false;
+        }
+        
+        String response;
+        serializeJson(doc, response);
+        request->send(200, "application/json", response);
+        return;
+      }
+    }
+    
+    request->send(404, "application/json", "{\"error\":\"User not found\"}");
+  });
+  
+  // API для запуска/остановки сниффинга
+  server.on("/ap/users/sniff", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("ip", true)) {
+      request->send(400, "application/json", "{\"error\":\"Missing IP parameter\"}");
+      return;
+    }
+    
+    String ip = request->getParam("ip", true)->value();
+    bool start = false;
+    
+    if (request->hasParam("action", true)) {
+      start = (request->getParam("action", true)->value() == "start");
+    }
+    
+    // Находим клиента по IP
+    int clientIndex = -1;
+    for (int i = 0; i < apClients.size(); i++) {
+      if (apClients[i].ip.toString() == ip) {
+        clientIndex = i;
+        break;
+      }
+    }
+    
+    if (clientIndex >= 0) {
+      if (start) {
+        startPacketSniffing(clientIndex);
+        request->send(200, "application/json", "{\"success\":true,\"message\":\"Sniffing started\"}");
+      } else {
+        stopPacketSniffing();
+        request->send(200, "application/json", "{\"success\":true,\"message\":\"Sniffing stopped\"}");
+      }
+    } else {
+      request->send(404, "application/json", "{\"error\":\"User not found\"}");
+    }
+  });
+  
   // Запуск веб-сервера
   server.begin();
 }
@@ -1623,8 +1830,8 @@ void handleButtons() {
       int displayLines = (M5.Lcd.height() - 30) / 16;
       if (selectedMenuItem < menuStartPosition) {
         menuStartPosition = selectedMenuItem;
-      } else if (selectedMenuItem == maxItems - 1 && maxItems > displayLines) {
-        menuStartPosition = maxItems - displayLines;
+      } else if (selectedMenuItem == maxItems - 1) {
+        menuStartPosition = max(0, maxItems - displayLines);
       }
       
       drawMenu();
@@ -1654,38 +1861,16 @@ void handleButtons() {
     buttonALongPress = false;
   }
   
-  // Кнопка B (Control/Scroll Down/Up на долгое нажатие)
+  // Кнопка B (Control/Scroll Down)
   if (M5.BtnB.isPressed()) {
     if (buttonBLastPress == 0) {
       buttonBLastPress = millis();
-    }
-    else if (!buttonBLongPress && millis() - buttonBLastPress > 500) {
-      // Долгое нажатие на B — прокрутка вверх на одну позицию
-      buttonBLongPress = true;
-      int maxItems = getMaxMenuItems();
-      // двигаем вверх, если в начале — на последний элемент
-      selectedMenuItem = (selectedMenuItem > 0)
-        ? selectedMenuItem - 1
-        : (maxItems + 1);
-  
-      // корректируем окно вывода
-      int displayLines = (M5.Lcd.height() - 30) / 16;
-      if (selectedMenuItem < menuStartPosition) {
-        menuStartPosition = selectedMenuItem;
-      } else if (selectedMenuItem == maxItems - 1) {
-        // если прыгнули на последний, показываем его внизу экрана
-        menuStartPosition = maxItems - displayLines;
-      }
-  
-      drawMenu();
     }
   } else {
     if (buttonBLastPress > 0 && !buttonBLongPress) {
       // Короткое нажатие на B — прокрутка вниз
       int maxItems = getMaxMenuItems();
-      selectedMenuItem = (selectedMenuItem < maxItems - 1)
-        ? selectedMenuItem + 1
-        : 0;
+      selectedMenuItem = (selectedMenuItem < maxItems - 1) ? selectedMenuItem + 1 : 0;
   
       int displayLines = (M5.Lcd.height() - 30) / 16;
       if (selectedMenuItem >= menuStartPosition + displayLines) {
@@ -1696,7 +1881,6 @@ void handleButtons() {
   
       drawMenu();
     }
-    // сброс флагов
     buttonBLastPress = 0;
     buttonBLongPress = false;
   }  
@@ -1723,14 +1907,17 @@ int getMaxMenuItems() {
     case MENU_AP_MODE_SELECT:
       return AP_MODE_ITEMS_COUNT;
     
+    case MENU_AP_USERS:
+      return apClients.size() + 1; // +1 для кнопки возврата
+    
+    case MENU_AP_USER_INFO:
+      return AP_USER_MENU_ITEMS_COUNT;
+    
     case MENU_WIFI_SCAN:
       return networks.size() > 0 ? networks.size() : 1;
     
     case MENU_WIFI_SAVED:
       return savedNetworks.size() + 1; // +1 для кнопки возврата
-    
-    case MENU_AP_USERS:
-      return apClients.size() + 1; // +1 для кнопки возврата
     
     case MENU_KVM_OPTIONS: {
       const auto& pins = kvmModule.getPins();
@@ -1752,7 +1939,6 @@ int getMaxMenuItems() {
       return 1;
   }
 }
-
 
 // Отрисовка меню
 void drawMenu() {
@@ -1783,6 +1969,9 @@ void drawMenu() {
       break;
     case MENU_AP_USERS:
       M5.Lcd.println("AP USERS");
+      break;
+    case MENU_AP_USER_INFO:
+      M5.Lcd.println("USER INFO");
       break;
     case MENU_AP_MODE_SELECT:
       M5.Lcd.println("AP MODE SELECT");
@@ -1941,7 +2130,7 @@ void drawMenu() {
     }
     
     case MENU_AP_USERS: {
-      // Отображаем список подключенных клиентов
+      // Отображаем список IP-адресов подключенных клиентов
       for (int i = menuStartPosition; i < apClients.size() && i < menuStartPosition + displayLines; i++) {
         M5.Lcd.setCursor(5, y);
         if (i == selectedMenuItem) {
@@ -1949,21 +2138,17 @@ void drawMenu() {
           M5.Lcd.setTextColor(WHITE);
         }
         
-        char macStr[18];
-        sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
-                apClients[i].mac[0], apClients[i].mac[1], apClients[i].mac[2],
-                apClients[i].mac[3], apClients[i].mac[4], apClients[i].mac[5]);
-        
         M5.Lcd.print(apClients[i].ip.toString());
-        M5.Lcd.print(" ");
-        M5.Lcd.print(apClients[i].blocked ? "[BLOCKED]" : "");
+        if (apClients[i].blocked) {
+          M5.Lcd.print(" [BLK]");
+        }
         
         y += 16;
         M5.Lcd.setTextColor(WHITE);
       }
       
       // Кнопка возврата
-      if (apClients.size() == selectedMenuItem || (apClients.size() == 0 && selectedMenuItem == 0)) {
+      if ((apClients.size() == selectedMenuItem) || (apClients.size() == 0 && selectedMenuItem == 0)) {
         M5.Lcd.setCursor(5, y);
         M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
         M5.Lcd.setTextColor(WHITE);
@@ -1971,6 +2156,65 @@ void drawMenu() {
       M5.Lcd.setCursor(5, y);
       M5.Lcd.print("Back to AP Status");
       M5.Lcd.setTextColor(WHITE);
+      break;
+    }
+    
+    case MENU_AP_USER_INFO: {
+      if (selectedAPUser >= 0 && selectedAPUser < apClients.size()) {
+        // Отображаем информацию о выбранном пользователе
+        const auto& client = apClients[selectedAPUser];
+        
+        // Info всегда отображается
+        M5.Lcd.setCursor(5, y);
+        M5.Lcd.print("IP: ");
+        M5.Lcd.println(client.ip.toString());
+        y += 16;
+        
+        M5.Lcd.setCursor(5, y);
+        char macStr[18];
+        sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+                client.mac[0], client.mac[1], client.mac[2],
+                client.mac[3], client.mac[4], client.mac[5]);
+        M5.Lcd.print("MAC: ");
+        M5.Lcd.println(macStr);
+        y += 16;
+        
+        M5.Lcd.setCursor(5, y);
+        M5.Lcd.print("Total: ");
+        M5.Lcd.print(client.totalBytes);
+        M5.Lcd.println(" bytes");
+        y += 16;
+        
+        // Пункты меню
+        for (int i = 1; i < AP_USER_MENU_ITEMS_COUNT; i++) {
+          M5.Lcd.setCursor(5, y);
+          if (i == selectedMenuItem) {
+            M5.Lcd.fillRect(0, y-1, M5.Lcd.width(), 12, BLUE);
+            M5.Lcd.setTextColor(WHITE);
+          }
+          
+          if (i == 2) { // Block
+            M5.Lcd.print(apUserMenuItems[i].title);
+            if (client.blocked) {
+              M5.Lcd.print(" [X]");
+            }
+          } else {
+            M5.Lcd.print(apUserMenuItems[i].title);
+          }
+          
+          y += 16;
+          M5.Lcd.setTextColor(WHITE);
+          
+          // Если пункт раскрыт, показываем содержимое
+          if (apUserMenuItems[i].expanded) {
+            if (i == 1) { // Sniff
+              M5.Lcd.setCursor(5, y);
+              M5.Lcd.println(client.lastPacket);
+              y += 16;
+            }
+          }
+        }
+      }
       break;
     }
     
@@ -2111,12 +2355,34 @@ void drawMenu() {
           M5.Lcd.setTextColor(WHITE);
         }
         
+        // Отображаем имя пина
         M5.Lcd.print(pins[i].name);
-        M5.Lcd.print(" (Pin ");
+        M5.Lcd.print(" (");
         M5.Lcd.print(pins[i].pin);
         M5.Lcd.print(")");
+        
+        // Отображаем состояние
+        M5.Lcd.print(" ");
+        if (globalDeviceSettings.invertPins) {
+          M5.Lcd.print(pins[i].state ? "OFF" : "ON");
+        } else {
+          M5.Lcd.print(pins[i].state ? "ON" : "OFF");
+        }
+        
+        // Добавляем кнопку импульса
+        M5.Lcd.setCursor(M5.Lcd.width() - 40, y);
+        M5.Lcd.print("[P]");
+        
         y += 16;
+        
+        // Отображаем настройку длительности импульса
+        M5.Lcd.setCursor(20, y);
+        M5.Lcd.setTextSize(1);
+        M5.Lcd.print("Pulse: 500ms");
+        y += 16;
+        
         M5.Lcd.setTextColor(WHITE);
+        M5.Lcd.setTextSize(1);
       }
       
       // Отображаем дополнительные пункты меню
@@ -2328,37 +2594,61 @@ void handleMenuAction() {
     
     case MENU_AP_USERS:
       if (selectedMenuItem < apClients.size()) {
-        // Переключаем блокировку клиента
-        char macStr[18];
-        sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
-                apClients[selectedMenuItem].mac[0],
-                apClients[selectedMenuItem].mac[1],
-                apClients[selectedMenuItem].mac[2],
-                apClients[selectedMenuItem].mac[3],
-                apClients[selectedMenuItem].mac[4],
-                apClients[selectedMenuItem].mac[5]);
-        
-        if (apClients[selectedMenuItem].blocked) {
-          // Разблокируем
-          for (auto it = blockedMACs.begin(); it != blockedMACs.end(); ++it) {
-            if (*it == macStr) {
-              blockedMACs.erase(it);
-              break;
-            }
-          }
-        } else {
-          // Блокируем
-          blockedMACs.push_back(macStr);
-          // В ESP32 нет прямого способа отключить клиента по MAC-адресу
-          // Но клиент будет заблокирован при следующей попытке подключения
-          // через фильтрацию MAC-адресов
-        }
-        updateAPClients();
+        // Выбираем пользователя и переходим в меню информации
+        selectedAPUser = selectedMenuItem;
+        currentSection = MENU_AP_USER_INFO;
+        selectedMenuItem = 0;
+        menuStartPosition = 0;
       } else if (selectedMenuItem == apClients.size()) {
         // Back to AP Status
         currentSection = MENU_AP_STATUS;
         selectedMenuItem = 0;
         menuStartPosition = 0;
+      }
+      break;
+    
+    case MENU_AP_USER_INFO:
+      if (selectedAPUser >= 0 && selectedAPUser < apClients.size()) {
+        if (selectedMenuItem == 1) { // Sniff
+          apUserMenuItems[1].expanded = !apUserMenuItems[1].expanded;
+          if (apUserMenuItems[1].expanded) {
+            startPacketSniffing(selectedAPUser);
+          } else {
+            stopPacketSniffing();
+          }
+        } else if (selectedMenuItem == 2) { // Block
+          // Переключаем блокировку пользователя
+          char macStr[18];
+          sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+                  apClients[selectedAPUser].mac[0],
+                  apClients[selectedAPUser].mac[1],
+                  apClients[selectedAPUser].mac[2],
+                  apClients[selectedAPUser].mac[3],
+                  apClients[selectedAPUser].mac[4],
+                  apClients[selectedAPUser].mac[5]);
+          
+          if (apClients[selectedAPUser].blocked) {
+            // Разблокируем
+            networkTools.unblockIP(apClients[selectedAPUser].ip.toString());
+            for (auto it = blockedMACs.begin(); it != blockedMACs.end(); ++it) {
+              if (*it == macStr) {
+                blockedMACs.erase(it);
+                break;
+              }
+            }
+          } else {
+            // Блокируем
+            networkTools.blockIP(apClients[selectedAPUser].ip.toString());
+            blockedMACs.push_back(macStr);
+          }
+          apClients[selectedAPUser].blocked = !apClients[selectedAPUser].blocked;
+        } else if (selectedMenuItem == 3) { // Back
+          currentSection = MENU_AP_USERS;
+          selectedMenuItem = selectedAPUser;
+          menuStartPosition = 0;
+          apUserMenuItems[1].expanded = false;
+          stopPacketSniffing();
+        }
       }
       break;
     
@@ -2450,8 +2740,14 @@ void handleMenuAction() {
     case MENU_KVM_OPTIONS: {
       const auto& pins = kvmModule.getPins();
       if (selectedMenuItem >= 0 && selectedMenuItem < pins.size()) {
-        // Управление пином KVM
-        kvmModule.togglePin(selectedMenuItem);
+        // Проверяем, нажат ли импульс
+        int x = M5.Touch.getTouchPointRawY(); // Координаты касания
+        if (x > M5.Lcd.width() - 50) { // Если касание в районе кнопки [P]
+          kvmModule.pulsePin(selectedMenuItem, 500); // Отправляем импульс
+        } else {
+          // Обычное переключение пина
+          kvmModule.togglePin(selectedMenuItem);
+        }
       } else if (selectedMenuItem == pins.size()) {
         // Изменение интервала проверки соединения
         ConnectionCheckInterval current = kvmModule.getCheckInterval();
@@ -2564,12 +2860,9 @@ void scanWiFiNetworks() {
   
   networks.clear();
   isScanningWifi = true;
-  drawMenu(); // Перерисовываем меню со статусом сканирования
+  scanResultsReady = false;
   
-  WiFi.scanNetworks(true); // Запускаем асинхронное сканирование
-  
-  // В основном цикле нужно будет проверять состояние сканирования
-  // и обновлять меню когда сканирование завершится
+  WiFi.scanNetworks(true, false, false, 300); // Асинхронное сканирование
 }
 
 // Выполнение диагностики сети
@@ -2774,6 +3067,9 @@ void updateAPClients() {
     APClient client;
     client.ip = IPAddress(adapterList.sta[i].ip.addr);
     memcpy(client.mac, adapterList.sta[i].mac, 6);
+    client.lastSeen = millis();
+    client.totalBytes = 0;
+    client.lastPacket = "";
     
     // Проверяем, заблокирован ли MAC
     char macStr[18];
@@ -2787,6 +3083,11 @@ void updateAPClients() {
         client.blocked = true;
         break;
       }
+    }
+    
+    // Проверяем, заблокирован ли IP
+    if (networkTools.isIPBlocked(client.ip)) {
+      client.blocked = true;
     }
     
     apClients.push_back(client);
@@ -2833,5 +3134,194 @@ void onStationConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
     Serial.println("Blocked MAC detected, disconnecting...");
     // Для отключения клиента можно вызвать ESP-IDF API:
     // wifi_softap_disconnect(sta.mac);
+  }
+}
+
+// Запуск сниффинга пакетов для пользователя
+void startPacketSniffing(int clientIndex) {
+  if (clientIndex >= 0 && clientIndex < apClients.size()) {
+    isSniffing = true;
+    
+    // Настраиваем WiFi для сниффинга
+    wifi_promiscuous_enable(0);
+    wifi_set_promiscuous_rx_cb(&promiscuous_rx_callback);
+    wifi_promiscuous_enable(1);
+    
+    // Устанавливаем фильтр для конкретного пользователя
+    currentSniffingClient = clientIndex;
+    currentSniffingMAC = apClients[clientIndex].mac;
+    
+    apClients[clientIndex].lastPacket = "Сниффинг активен...";
+  }
+}
+
+// Остановка сниффинга пакетов
+void stopPacketSniffing() {
+  isSniffing = false;
+  currentSniffingClient = -1;
+  wifi_promiscuous_enable(0);
+}
+
+// Колбэк для обработки перехваченных пакетов
+void promiscuous_rx_callback(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (!isSniffing || currentSniffingClient < 0) return;
+  
+  wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+  wifi_pkt_rx_ctrl_t ctrl = pkt->rx_ctrl;
+  
+  // Извлекаем MAC адрес отправителя
+  uint8_t* payload = pkt->payload;
+  uint8_t* source_mac = payload + 10; // Смещение для Source MAC
+  
+  // Проверяем, соответствует ли MAC адрес нашему клиенту
+  bool match = true;
+  for (int i = 0; i < 6; i++) {
+    if (source_mac[i] != currentSniffingMAC[i]) {
+      match = false;
+      break;
+    }
+  }
+  
+  if (match) {
+    // Обновляем информацию о трафике
+    apClients[currentSniffingClient].totalBytes += ctrl.sig_len;
+    
+    // Формируем информацию о пакете
+    char packetInfo[100];
+    snprintf(packetInfo, sizeof(packetInfo), "Type:%d Size:%d RSSI:%d Ch:%d", 
+             type, ctrl.sig_len, ctrl.rssi, ctrl.channel);
+    
+    apClients[currentSniffingClient].lastPacket = String(packetInfo);
+    apClients[currentSniffingClient].lastSeen = millis();
+  }
+}
+
+// Функция смены IP адреса (реальная реализация)
+void shuffleIP() {
+  if (WiFi.status() == WL_CONNECTED) {
+    // Сохраняем текущие учетные данные
+    String currentSSID = WiFi.SSID();
+    String currentPassword = "";
+    
+    // Находим пароль в сохраненных сетях
+    for (const auto& network : savedNetworks) {
+      if (network.ssid == currentSSID) {
+        currentPassword = network.password;
+        break;
+      }
+    }
+    
+    // Отключаемся от сети
+    WiFi.disconnect(true);
+    delay(1000);
+    
+    // Настраиваем новый MAC адрес
+    uint8_t newMAC[6];
+    esp_read_mac(newMAC, ESP_MAC_WIFI_STA);
+    
+    // Изменяем последний байт MAC адреса
+    newMAC[5] = random(0, 255);
+    
+    // Применяем новый MAC адрес
+    esp_wifi_set_mac(WIFI_IF_STA, newMAC);
+    
+    // Подключаемся заново с новым MAC адресом
+    WiFi.begin(currentSSID.c_str(), currentPassword.c_str());
+    
+    // Показываем уведомление
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.println("Shuffling IP...");
+    M5.Lcd.println("New MAC: ");
+    
+    char macStr[18];
+    sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+            newMAC[0], newMAC[1], newMAC[2],
+            newMAC[3], newMAC[4], newMAC[5]);
+    M5.Lcd.println(macStr);
+    M5.Lcd.println("Please wait...");
+    
+    // Ждем подключения
+    int timeout = 0;
+    while (WiFi.status() != WL_CONNECTED && timeout < 20) {
+      delay(500);
+      M5.Lcd.print(".");
+      timeout++;
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      M5.Lcd.println();
+      M5.Lcd.println("New IP: ");
+      M5.Lcd.println(WiFi.localIP());
+    } else {
+      M5.Lcd.println();
+      M5.Lcd.println("Connection failed!");
+    }
+    
+    delay(3000);
+  }
+}
+
+// Функция получения информации о подключенных клиентах
+void updateAPClients() {
+  apClients.clear();
+  
+  wifi_sta_list_t stationList;
+  tcpip_adapter_sta_list_t adapterList;
+  
+  if (WiFi.softAPgetStationNum() == 0) {
+    return;
+  }
+  
+  esp_wifi_ap_get_sta_list(&stationList);
+  tcpip_adapter_get_sta_list(&stationList, &adapterList);
+  
+  for (int i = 0; i < adapterList.num; i++) {
+    APClient client;
+    client.ip = IPAddress(adapterList.sta[i].ip.addr);
+    memcpy(client.mac, adapterList.sta[i].mac, 6);
+    client.lastSeen = millis();
+    client.totalBytes = 0;
+    client.lastPacket = "";
+    
+    // Проверяем, заблокирован ли MAC
+    char macStr[18];
+    sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+            client.mac[0], client.mac[1], client.mac[2],
+            client.mac[3], client.mac[4], client.mac[5]);
+    
+    client.blocked = false;
+    for (const auto& blockedMAC : blockedMACs) {
+      if (blockedMAC == macStr) {
+        client.blocked = true;
+        break;
+      }
+    }
+    
+    // Проверяем, заблокирован ли IP
+    if (networkTools.isIPBlocked(client.ip)) {
+      client.blocked = true;
+    }
+    
+    // Если клиент заблокирован, пытаемся отключить его
+    if (client.blocked) {
+      esp_wifi_deauth_sta(adapterList.sta[i].mac);
+    }
+    
+    apClients.push_back(client);
+  }
+}
+
+// Обработчик подключения станции (реальная реализация)
+void onStationConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
+  auto& sta = info.wifi_ap_staconnected;
+  Serial.printf("Station connected: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                sta.mac[0], sta.mac[1], sta.mac[2],
+                sta.mac[3], sta.mac[4], sta.mac[5]);
+
+  if (isMACBlocked(sta.mac)) {
+    Serial.println("Blocked MAC detected, disconnecting...");
+    // Отключаем клиента с заблокированным MAC
+    esp_wifi_deauth_sta(sta.mac);
   }
 }
