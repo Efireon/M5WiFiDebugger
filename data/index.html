@@ -383,6 +383,34 @@
             color: var(--error-color);
         }
 
+        .pin-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .pulse-control {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .pulse-control input[type="number"] {
+            width: 80px;
+            padding: 5px;
+            font-size: 14px;
+        }
+
+        .pulse-button {
+            background-color: var(--warning-color);
+            color: #333;
+            padding: 8px 12px;
+            font-size: 14px;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+
         .toggle-btn {
             position: relative;
             display: inline-block;
@@ -668,6 +696,73 @@
             background-color: rgba(255, 255, 255, 0.1);
         }
 
+        /* Styles for AP Users interface */
+        .ap-users-list {
+            margin-bottom: 20px;
+        }
+
+        .ap-user-card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .ap-user-info {
+            flex-grow: 1;
+        }
+
+        .ap-user-controls {
+            display: flex;
+            gap: 10px;
+        }
+
+        .traffic-display {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: rgba(0, 0, 0, 0.05);
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.9em;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        [data-theme="dark"] .traffic-display {
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+        
+        .traffic-display .divider {
+            margin: 10px 0;
+            height: 1px;
+            background-color: var(--border-color);
+        }
+        
+        .traffic-display .packet-info {
+            margin: 5px 0;
+            padding: 5px;
+            background-color: rgba(0, 0, 0, 0.02);
+            border-radius: 3px;
+        }
+        
+        [data-theme="dark"] .traffic-display .packet-info {
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+
+        .user-details-section {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .user-details-section.hidden {
+            display: none;
+        }
+
         /* Pulse animation for scanning indicator */
         @keyframes pulse {
             0% { opacity: 0.6; }
@@ -683,12 +778,6 @@
             width: 12px;
             height: 12px;
             margin-right: 10px;
-        }
-
-        .pin-pulse {
-            padding: 5px 10px;
-            font-size: 14px;
-            margin-left: 10px;
         }
 
         @keyframes slideIn {
@@ -756,6 +845,19 @@
             .pin-state {
                 width: 100%;
                 text-align: left;
+            }
+
+            .pin-controls {
+                width: 100%;
+                flex-wrap: wrap;
+            }
+
+            .pulse-control {
+                width: 100%;
+            }
+
+            .pulse-control input[type="number"] {
+                width: 60px;
             }
         }
     </style>
@@ -958,6 +1060,16 @@
                 </form>
             </div>
             
+            <div class="card">
+                <h3>Подключенные пользователи</h3>
+                <div id="ap-users-list" class="ap-users-list">
+                    <p class="text-center">Загрузка списка пользователей...</p>
+                </div>
+                <div class="spacer">
+                    <button onclick="loadAPUsers()" class="primary">Обновить список</button>
+                </div>
+            </div>
+            
             <div id="honeypot-section" class="card" style="display: none; margin-top: 20px;">
                 <h3>Логи Honeypot</h3>
                 <button onclick="getHoneypotLogs()" class="primary">Обновить логи</button>
@@ -1002,26 +1114,6 @@
                     </div>
                     
                     <button type="submit" class="success">Добавить пин</button>
-                </form>
-            </div>
-            
-            <div class="card">
-                <h3>Импульсный режим</h3>
-                <p>Отправка короткого импульса на выбранный пин</p>
-                <form id="pulse-pin-form">
-                    <div class="form-group">
-                        <label for="pulse-pin-select">Выберите пин:</label>
-                        <select id="pulse-pin-select" name="pin" required>
-                            <option value="">-- Выберите пин --</option>
-                        </select>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="pulse-duration">Длительность импульса (мс):</label>
-                        <input type="number" id="pulse-duration" name="duration" value="500" min="50" max="10000" required>
-                    </div>
-                    
-                    <button type="submit" class="primary">Отправить импульс</button>
                 </form>
             </div>
             
@@ -1212,6 +1304,8 @@ curl -X POST "http://{IP-адрес}/api/kvm/pulse?index=0&duration=500"
         let currentMode = '';
         let isAPModeActive = false;
         let isPinInverted = false;
+        let currentUserIP = null;
+        let sniffInterval = null;
         
         // Функция для загрузки доступных пинов
         function loadAvailablePins() {
@@ -1252,6 +1346,7 @@ curl -X POST "http://{IP-адрес}/api/kvm/pulse?index=0&duration=500"
             loadAPSettings();
             loadDeviceSettings();
             loadSavedNetworks();
+            loadAPUsers();
             
             // Настройка обработчика для темы
             document.getElementById('theme-toggle').addEventListener('click', function() {
@@ -1311,11 +1406,6 @@ curl -X POST "http://{IP-адрес}/api/kvm/pulse?index=0&duration=500"
             document.getElementById('device-settings-form').addEventListener('submit', function(e) {
                 e.preventDefault();
                 saveDeviceSettings();
-            });
-
-            document.getElementById('pulse-pin-form').addEventListener('submit', function(e) {
-                e.preventDefault();
-                sendPulseToPin();
             });
             
             // Обработчик выбора режима AP
@@ -1381,13 +1471,9 @@ curl -X POST "http://{IP-адрес}/api/kvm/pulse?index=0&duration=500"
         }
         
         // Функция для отправки импульса на пин
-        function sendPulseToPin() {
-            const pinIndex = document.getElementById('pulse-pin-select').value;
-            const duration = document.getElementById('pulse-duration').value;
-            
-            if (!pinIndex) {
-                showNotification('Выберите пин для отправки импульса', 'warning');
-                return;
+        function sendPulseToPin(pinIndex, duration) {
+            if (!duration) {
+                duration = document.querySelector(`#pin-pulse-duration-${pinIndex}`).value;
             }
             
             fetch('/api/kvm/pulse', {
@@ -1573,6 +1659,7 @@ curl -X POST "http://{IP-адрес}/api/kvm/pulse?index=0&duration=500"
                 loadAvailablePins();
             } else if (tabName === 'ap') {
                 loadAPSettings();
+                loadAPUsers();
             } else if (tabName === 'device') {
                 loadDeviceSettings();
                 loadDeviceInfo();
@@ -2102,14 +2189,7 @@ curl -X POST "http://{IP-адрес}/api/kvm/pulse?index=0&duration=500"
         // Функция для загрузки KVM пинов
         function loadKVMPins() {
             const pinsList = document.getElementById('pins-list');
-            const pulsePinSelect = document.getElementById('pulse-pin-select');
-            
             pinsList.innerHTML = '<p class="text-center">Загрузка пинов...</p>';
-            
-            // Очищаем выпадающий список пинов для импульсов
-            while (pulsePinSelect.options.length > 1) {
-                pulsePinSelect.remove(1);
-            }
             
             fetch('/kvm')
                 .then(response => {
@@ -2135,19 +2215,6 @@ curl -X POST "http://{IP-адрес}/api/kvm/pulse?index=0&duration=500"
                             pinInfo.innerHTML = `<strong>${pin.name}</strong><br>Пин #${pin.pin}`;
                             pinCard.appendChild(pinInfo);
                             
-                            // Добавляем кнопку для отправки импульса
-                            const pulseButton = document.createElement('button');
-                            pulseButton.className = 'primary pin-pulse';
-                            pulseButton.textContent = 'Импульс';
-                            pulseButton.addEventListener('click', function() {
-                                // Выбираем пин в выпадающем списке и прокручиваем к форме импульса
-                                document.getElementById('pulse-pin-select').value = index;
-                                document.getElementById('pulse-pin-form').scrollIntoView({
-                                    behavior: 'smooth'
-                                });
-                            });
-                            pinCard.appendChild(pulseButton);
-                            
                             // Режим мониторинга
                             const monitorDiv = document.createElement('div');
                             monitorDiv.innerHTML = `
@@ -2168,13 +2235,18 @@ curl -X POST "http://{IP-адрес}/api/kvm/pulse?index=0&duration=500"
                             // Если режим инвертирован, отображаем обратное состояние
                             if (isPinInverted) {
                                 pinState.textContent = pin.state ? 'ВЫКЛ' : 'ВКЛ';
+                                pinState.className = `pin-state ${pin.state ? 'off' : 'on'}`;
                             } else {
                                 pinState.textContent = pin.state ? 'ВКЛ' : 'ВЫКЛ';
                             }
                             
                             pinCard.appendChild(pinState);
                             
-                            // Переключатель
+                            // Элементы управления пином
+                            const pinControls = document.createElement('div');
+                            pinControls.className = 'pin-controls';
+                            
+                            // Переключатель состояния
                             const toggleContainer = document.createElement('div');
                             toggleContainer.innerHTML = `
                                 <label class="toggle-btn">
@@ -2182,15 +2254,28 @@ curl -X POST "http://{IP-адрес}/api/kvm/pulse?index=0&duration=500"
                                     <span class="slider"></span>
                                 </label>
                             `;
-                            pinCard.appendChild(toggleContainer);
+                            pinControls.appendChild(toggleContainer);
                             
+                            // Управление импульсом
+                            const pulseControl = document.createElement('div');
+                            pulseControl.className = 'pulse-control';
+                            pulseControl.innerHTML = `
+                                <input type="number" id="pin-pulse-duration-${index}" 
+                                       class="pulse-duration" 
+                                       value="500" 
+                                       min="50" 
+                                       max="10000" 
+                                       placeholder="мс">
+                                <button class="pulse-button" 
+                                        onclick="sendPulseToPin(${index})"
+                                        title="Отправить импульс">
+                                    ⚡ Импульс
+                                </button>
+                            `;
+                            pinControls.appendChild(pulseControl);
+                            
+                            pinCard.appendChild(pinControls);
                             pinsList.appendChild(pinCard);
-                            
-                            // Добавляем пин в выпадающий список для импульсов
-                            const option = document.createElement('option');
-                            option.value = index;
-                            option.textContent = `${pin.name} (Пин #${pin.pin})`;
-                            pulsePinSelect.appendChild(option);
                         });
                         
                         // Добавляем обработчики событий для переключателей и выпадающих списков
@@ -2817,6 +2902,221 @@ curl -X POST "http://{IP-адрес}/api/kvm/pulse?index=0&duration=500"
                 console.error('Ошибка при разблокировке IP:', error);
                 showNotification('Ошибка при разблокировке IP: ' + error.message, 'error');
             });
+        }
+        
+        // Функция для загрузки списка пользователей AP
+        function loadAPUsers() {
+            const usersList = document.getElementById('ap-users-list');
+            
+            if (!isAPModeActive) {
+                usersList.innerHTML = '<p class="text-center">Точка доступа не активна</p>';
+                return;
+            }
+            
+            usersList.innerHTML = '<p class="text-center">Загрузка списка пользователей...</p>';
+            
+            fetch('/ap/users')
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Ошибка сети');
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.users && data.users.length > 0) {
+                        let html = '';
+                        
+                        data.users.forEach(user => {
+                            html += `
+                                <div class="ap-user-card" id="user-${user.ip.replace(/\./g, '-')}">
+                                    <div class="ap-user-info">
+                                        <h4>${user.ip}</h4>
+                                        <div>MAC: ${user.mac}</div>
+                                        <div>Общий трафик: ${user.totalBytes} байт</div>
+                                        <div>Последняя активность: ${new Date(user.lastSeen).toLocaleString()}</div>
+                                    </div>
+                                    <div class="ap-user-controls">
+                                        <button class="primary" onclick="showUserDetails('${user.ip}')">Подробнее</button>
+                                        <button class="${user.blocked ? 'success' : 'danger'}" 
+                                                onclick="toggleUserBlock('${user.ip}', ${!user.blocked})">
+                                            ${user.blocked ? 'Разблокировать' : 'Заблокировать'}
+                                        </button>
+                                    </div>
+                                </div>
+                                <div id="user-details-${user.ip.replace(/\./g, '-')}" class="user-details-section hidden">
+                                    <div>
+                                        <h5>Информация о пользователе</h5>
+                                        <table>
+                                            <tr><td>IP:</td><td>${user.ip}</td></tr>
+                                            <tr><td>MAC:</td><td>${user.mac}</td></tr>
+                                            <tr><td>Общий трафик:</td><td>${user.totalBytes} байт</td></tr>
+                                            <tr><td>Последняя активность:</td><td>${new Date(user.lastSeen).toLocaleString()}</td></tr>
+                                            <tr><td>Статус:</td><td>${user.blocked ? 'Заблокирован' : 'Активен'}</td></tr>
+                                        </table>
+                                    </div>
+                                    <div>
+                                        <h5>Трафик</h5>
+                                        <button class="primary" onclick="startSniffing('${user.ip}')">Начать сниффинг</button>
+                                        <button class="danger" onclick="stopSniffing()">Остановить сниффинг</button>
+                                        <div id="traffic-display-${user.ip.replace(/\./g, '-')}" class="traffic-display"></div>
+                                    </div>
+                                </div>
+                            `;
+                        });
+                        
+                        usersList.innerHTML = html;
+                    } else {
+                        usersList.innerHTML = '<p class="text-center">Нет подключенных пользователей</p>';
+                    }
+                })
+                .catch(error => {
+                    console.error('Ошибка при загрузке списка пользователей:', error);
+                    usersList.innerHTML = '<p class="text-center">Ошибка при загрузке списка пользователей</p>';
+                    showNotification('Ошибка при загрузке списка пользователей: ' + error.message, 'error');
+                });
+        }
+        
+        // Функция для показа деталей пользователя
+        function showUserDetails(ip) {
+            const detailsDiv = document.getElementById(`user-details-${ip.replace(/\./g, '-')}`);
+            if (detailsDiv) {
+                detailsDiv.classList.toggle('hidden');
+            }
+        }
+        
+        // Функция для переключения блокировки пользователя
+        function toggleUserBlock(ip, block) {
+            fetch('/ap/users/block', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `ip=${encodeURIComponent(ip)}&blocked=${block ? 1 : 0}`
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Ошибка сети');
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.success) {
+                    showNotification(`Пользователь ${ip} ${block ? 'заблокирован' : 'разблокирован'}`, 'success');
+                    loadAPUsers();
+                } else {
+                    showNotification(`Ошибка: ${data.error}`, 'error');
+                }
+            })
+            .catch(error => {
+                console.error('Ошибка при изменении блокировки пользователя:', error);
+                showNotification('Ошибка при изменении блокировки пользователя: ' + error.message, 'error');
+            });
+        }
+        
+        // Функция для начала сниффинга трафика
+        function startSniffing(ip) {
+            currentUserIP = ip;
+            const trafficDisplay = document.getElementById(`traffic-display-${ip.replace(/\./g, '-')}`);
+            
+            if (trafficDisplay) {
+                trafficDisplay.innerHTML = '<p>Запуск сниффинга...</p>';
+            }
+            
+            // Отправляем запрос на запуск сниффинга
+            fetch('/ap/users/sniff', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `ip=${encodeURIComponent(ip)}&action=start`
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showNotification('Сниффинг запущен', 'success');
+                    // Начинаем периодическое обновление трафика
+                    sniffInterval = setInterval(() => {
+                        fetch(`/ap/users/traffic?ip=${encodeURIComponent(ip)}`)
+                            .then(response => {
+                                if (!response.ok) {
+                                    throw new Error('Ошибка сети');
+                                }
+                                return response.json();
+                            })
+                            .then(data => {
+                                if (trafficDisplay) {
+                                    let displayHtml = `
+                                        <div><strong>Общий трафик:</strong> ${data.totalBytes} байт</div>
+                                        <div><strong>Последний пакет:</strong> ${data.lastPacket || 'Нет данных'}</div>
+                                        <div><strong>Обновлено:</strong> ${new Date().toLocaleTimeString()}</div>
+                                    `;
+                                    
+                                    if (data.sniffing && data.lastPacketInfo) {
+                                        displayHtml += `
+                                            <div class="divider"></div>
+                                            <div><strong>Сниффинг активен</strong></div>
+                                            <div><strong>Перехвачено пакетов:</strong> ${data.sniffedPackets}</div>
+                                            <div><strong>Информация о пакете:</strong> ${data.lastPacketInfo}</div>
+                                        `;
+                                    }
+                                    
+                                    trafficDisplay.innerHTML = displayHtml;
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Ошибка при получении трафика:', error);
+                                if (sniffInterval) {
+                                    clearInterval(sniffInterval);
+                                    sniffInterval = null;
+                                }
+                                showNotification('Ошибка при получении трафика: ' + error.message, 'error');
+                            });
+                    }, 1000); // Обновляем каждую секунду
+                } else {
+                    showNotification(`Ошибка запуска сниффинга: ${data.error}`, 'error');
+                }
+            })
+            .catch(error => {
+                console.error('Ошибка при запуске сниффинга:', error);
+                showNotification('Ошибка при запуске сниффинга: ' + error.message, 'error');
+            });
+        }
+        
+        // Функция для остановки сниффинга трафика
+        function stopSniffing() {
+            if (sniffInterval) {
+                clearInterval(sniffInterval);
+                sniffInterval = null;
+            }
+            
+            if (currentUserIP) {
+                // Отправляем запрос на остановку сниффинга
+                fetch('/ap/users/sniff', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `ip=${encodeURIComponent(currentUserIP)}&action=stop`
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        showNotification('Сниффинг остановлен', 'success');
+                        const trafficDisplay = document.getElementById(`traffic-display-${currentUserIP.replace(/\./g, '-')}`);
+                        if (trafficDisplay) {
+                            trafficDisplay.innerHTML = '<p>Сниффинг остановлен</p>';
+                        }
+                    } else {
+                        showNotification(`Ошибка остановки сниффинга: ${data.error}`, 'error');
+                    }
+                })
+                .catch(error => {
+                    console.error('Ошибка при остановке сниффинга:', error);
+                    showNotification('Ошибка при остановке сниффинга: ' + error.message, 'error');
+                });
+                
+                currentUserIP = null;
+            }
         }
     </script>
 </body>
