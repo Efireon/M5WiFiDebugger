@@ -1877,140 +1877,115 @@ curl -X POST "http://{IP-адрес}/api/kvm/pulse?index=0&duration=500"
             
             // Функция для получения результатов сканирования
             function getNetworkResults() {
-                fetch('/scan-results?page=0&size=10')
+                fetch('/scan-results')
                     .then(response => {
-                        if (!response.ok) {
-                            throw new Error('Ошибка сети');
-                        }
-                        return response.json();
+                    if (!response.ok) {
+                        throw new Error('Ошибка сети');
+                    }
+                    return response.json();
                     })
                     .then(data => {
-                        // Обновляем список сетей
-                        networksList.innerHTML = '';
+                    // Обновляем список сетей
+                    networksList.innerHTML = '';
+                    
+                    if (data.networks && data.networks.length > 0) {
+                        data.networks.forEach(network => {
+                        const row = document.createElement('tr');
                         
-                        if (data.networks && data.networks.length > 0) {
-                            data.networks.forEach(network => {
-                                const row = document.createElement('tr');
-                                
-                                // SSID
-                                const ssidCell = document.createElement('td');
-                                ssidCell.textContent = network.ssid || '(Скрытая сеть)';
-                                row.appendChild(ssidCell);
-                                
-                                // Сигнал с визуальным индикатором
-                                const rssiCell = document.createElement('td');
-                                const signalDiv = document.createElement('div');
-                                signalDiv.className = 'align-center';
-                                
-                                const signalText = document.createElement('span');
-                                signalText.textContent = `${network.rssi} dBm`;
-                                
-                                const signalIndicator = document.createElement('span');
-                                signalIndicator.className = 'signal-strength';
-                                
-                                for (let i = 1; i <= 4; i++) {
-                                    const bar = document.createElement('span');
-                                    bar.className = `signal-bar bar${i}`;
-                                    signalIndicator.appendChild(bar);
-                                }
-                                
-                                if (network.rssi > -50) {
-                                    signalIndicator.classList.add('signal-excellent');
-                                } else if (network.rssi > -70) {
-                                    signalIndicator.classList.add('signal-good');
-                                } else if (network.rssi > -80) {
-                                    signalIndicator.classList.add('signal-fair');
-                                } else {
-                                    signalIndicator.classList.add('signal-weak');
-                                }
-                                
-                                signalDiv.appendChild(signalText);
-                                signalDiv.appendChild(signalIndicator);
-                                rssiCell.appendChild(signalDiv);
-                                row.appendChild(rssiCell);
-                                
-                                // Безопасность
-                                const securityCell = document.createElement('td');
-                                const securitySpan = document.createElement('span');
-                                securitySpan.textContent = network.encryption;
-                                
-                                if (network.encryption === 'Open') {
-                                    securitySpan.className = 'badge warning';
-                                } else {
-                                    securitySpan.className = 'badge success';
-                                }
-                                
-                                securityCell.appendChild(securitySpan);
-                                row.appendChild(securityCell);
-                                
-                                // Канал
-                                const channelCell = document.createElement('td');
-                                channelCell.textContent = network.channel;
-                                row.appendChild(channelCell);
-                                
-                                // Кнопка подключения
-                                const actionCell = document.createElement('td');
-                                const connectBtn = document.createElement('button');
-                                connectBtn.textContent = 'Подключиться';
-                                connectBtn.className = 'primary';
-                                connectBtn.addEventListener('click', function() {
-                                    // Заполняем форму подключения данными выбранной сети
-                                    document.getElementById('ssid').value = network.ssid;
-                                    document.getElementById('password').focus();
-                                    
-                                    // Прокручиваем до формы подключения
-                                    document.getElementById('connect-form').scrollIntoView({
-                                        behavior: 'smooth'
-                                    });
-                                });
-                                actionCell.appendChild(connectBtn);
-                                row.appendChild(actionCell);
-                                
-                                networksList.appendChild(row);
-                            });
-                            
-                            // Добавление пагинации, если есть больше одной страницы
-                            if (data.totalPages > 1) {
-                                const paginationRow = document.createElement('tr');
-                                const paginationCell = document.createElement('td');
-                                paginationCell.colSpan = 5;
-                                paginationCell.className = 'text-center';
-                                
-                                const paginationDiv = document.createElement('div');
-                                paginationDiv.className = 'pagination';
-                                
-                                for (let i = 0; i < data.totalPages; i++) {
-                                    const pageLink = document.createElement('button');
-                                    pageLink.className = i === data.page ? 'primary' : 'secondary';
-                                    pageLink.textContent = i + 1;
-                                    pageLink.addEventListener('click', function() {
-                                        loadNetworkPage(i);
-                                    });
-                                    paginationDiv.appendChild(pageLink);
-                                }
-                                
-                                paginationCell.appendChild(paginationDiv);
-                                paginationRow.appendChild(paginationCell);
-                                networksList.appendChild(paginationRow);
-                            }
-                        } else {
-                            networksList.innerHTML = '<tr><td colspan="5" class="text-center">Сети не найдены</td></tr>';
+                        // SSID
+                        const ssidCell = document.createElement('td');
+                        ssidCell.textContent = network.ssid || '(Скрытая сеть)';
+                        row.appendChild(ssidCell);
+                        
+                        // Сигнал с визуальным индикатором
+                        const rssiCell = document.createElement('td');
+                        const signalDiv = document.createElement('div');
+                        signalDiv.className = 'align-center';
+                        
+                        const signalText = document.createElement('span');
+                        signalText.textContent = `${network.rssi} dBm`;
+                        
+                        const signalIndicator = document.createElement('span');
+                        signalIndicator.className = 'signal-strength';
+                        
+                        for (let i = 1; i <= 4; i++) {
+                            const bar = document.createElement('span');
+                            bar.className = `signal-bar bar${i}`;
+                            signalIndicator.appendChild(bar);
                         }
                         
-                        // Обновляем статус
-                        scanButton.disabled = false;
-                        scanStatus.style.display = 'none';
-                        showNotification('Сканирование WiFi сетей завершено', 'success');
+                        if (network.rssi > -50) {
+                            signalIndicator.classList.add('signal-excellent');
+                        } else if (network.rssi > -70) {
+                            signalIndicator.classList.add('signal-good');
+                        } else if (network.rssi > -80) {
+                            signalIndicator.classList.add('signal-fair');
+                        } else {
+                            signalIndicator.classList.add('signal-weak');
+                        }
+                        
+                        signalDiv.appendChild(signalText);
+                        signalDiv.appendChild(signalIndicator);
+                        rssiCell.appendChild(signalDiv);
+                        row.appendChild(rssiCell);
+                        
+                        // Безопасность
+                        const securityCell = document.createElement('td');
+                        const securitySpan = document.createElement('span');
+                        securitySpan.textContent = network.encryption;
+                        
+                        if (network.encryption === 'Open') {
+                            securitySpan.className = 'badge warning';
+                        } else {
+                            securitySpan.className = 'badge success';
+                        }
+                        
+                        securityCell.appendChild(securitySpan);
+                        row.appendChild(securityCell);
+                        
+                        // Канал
+                        const channelCell = document.createElement('td');
+                        channelCell.textContent = network.channel;
+                        row.appendChild(channelCell);
+                        
+                        // Кнопка подключения
+                        const actionCell = document.createElement('td');
+                        const connectBtn = document.createElement('button');
+                        connectBtn.textContent = 'Подключиться';
+                        connectBtn.className = 'primary';
+                        connectBtn.addEventListener('click', function() {
+                            // Заполняем форму подключения данными выбранной сети
+                            document.getElementById('ssid').value = network.ssid;
+                            document.getElementById('password').focus();
+                            
+                            // Прокручиваем до формы подключения
+                            document.getElementById('connect-form').scrollIntoView({
+                            behavior: 'smooth'
+                            });
+                        });
+                        actionCell.appendChild(connectBtn);
+                        row.appendChild(actionCell);
+                        
+                        networksList.appendChild(row);
+                        });
+                    } else {
+                        networksList.innerHTML = '<tr><td colspan="5" class="text-center">Сети не найдены</td></tr>';
+                    }
+                    
+                    // Обновляем статус
+                    scanButton.disabled = false;
+                    scanStatus.style.display = 'none';
+                    showNotification('Сканирование WiFi сетей завершено', 'success');
                     })
                     .catch(error => {
-                        // Отображаем ошибку
-                        networksList.innerHTML = '<tr><td colspan="5" class="text-center">Ошибка при получении результатов сканирования</td></tr>';
-                        console.error('Ошибка при получении результатов сканирования:', error);
-                        scanButton.disabled = false;
-                        scanStatus.style.display = 'none';
-                        showNotification('Ошибка при получении результатов сканирования: ' + error.message, 'error');
+                    // Отображаем ошибку
+                    networksList.innerHTML = '<tr><td colspan="5" class="text-center">Ошибка при получении результатов сканирования</td></tr>';
+                    console.error('Ошибка при получении результатов сканирования:', error);
+                    scanButton.disabled = false;
+                    scanStatus.style.display = 'none';
+                    showNotification('Ошибка при получении результатов сканирования: ' + error.message, 'error');
                     });
-            }
+            }            
             
             // Функция для загрузки конкретной страницы результатов
             function loadNetworkPage(page) {

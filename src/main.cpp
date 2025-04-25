@@ -535,6 +535,55 @@ void promiscuous_rx_callback(void* buf, wifi_promiscuous_pkt_type_t type);
 bool isMACBlocked(const uint8_t* mac);
 void onStationConnected(WiFiEvent_t event, WiFiEventInfo_t info);
 
+
+// Функция сохранения заблокированных MAC
+void saveBlockedMACs() {
+  DynamicJsonDocument doc(2048);
+  
+  JsonArray blockedArray = doc.createNestedArray("blocked");
+  for (const auto& mac : blockedMACs) {
+    blockedArray.add(mac);
+  }
+  
+  File file = LittleFS.open("/blocked_macs.json", "w");
+  if (!file) {
+    Serial.println("Failed to open blocked_macs.json for writing");
+    return;
+  }
+  
+  serializeJson(doc, file);
+  file.close();
+}
+
+// Функция загрузки заблокированных MAC
+void loadBlockedMACs() {
+  if (!LittleFS.exists("/blocked_macs.json")) {
+    return;
+  }
+  
+  File file = LittleFS.open("/blocked_macs.json", "r");
+  if (!file) {
+    return;
+  }
+  
+  DynamicJsonDocument doc(2048);
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  
+  if (error) {
+    return;
+  }
+  
+  blockedMACs.clear();
+  
+  if (doc.containsKey("blocked")) {
+    JsonArray blockedArray = doc["blocked"];
+    for (JsonVariant v : blockedArray) {
+      blockedMACs.push_back(v.as<String>());
+    }
+  }
+}
+
 // Функция инициализации
 void setup() {
   // Инициализация M5StickCPlus2
@@ -3481,54 +3530,6 @@ void promiscuous_rx_callback(void* buf, wifi_promiscuous_pkt_type_t type) {
     
     apClients[currentSniffingClient].lastPacket = String(packetInfo);
     apClients[currentSniffingClient].lastSeen = millis();
-  }
-}
-
-// Функция сохранения заблокированных MAC
-void saveBlockedMACs() {
-  DynamicJsonDocument doc(2048);
-  
-  JsonArray blockedArray = doc.createNestedArray("blocked");
-  for (const auto& mac : blockedMACs) {
-    blockedArray.add(mac);
-  }
-  
-  File file = LittleFS.open("/blocked_macs.json", "w");
-  if (!file) {
-    Serial.println("Failed to open blocked_macs.json for writing");
-    return;
-  }
-  
-  serializeJson(doc, file);
-  file.close();
-}
-
-// Функция загрузки заблокированных MAC
-void loadBlockedMACs() {
-  if (!LittleFS.exists("/blocked_macs.json")) {
-    return;
-  }
-  
-  File file = LittleFS.open("/blocked_macs.json", "r");
-  if (!file) {
-    return;
-  }
-  
-  DynamicJsonDocument doc(2048);
-  DeserializationError error = deserializeJson(doc, file);
-  file.close();
-  
-  if (error) {
-    return;
-  }
-  
-  blockedMACs.clear();
-  
-  if (doc.containsKey("blocked")) {
-    JsonArray blockedArray = doc["blocked"];
-    for (JsonVariant v : blockedArray) {
-      blockedMACs.push_back(v.as<String>());
-    }
   }
 }
 
