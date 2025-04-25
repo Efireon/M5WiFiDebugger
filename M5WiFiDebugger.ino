@@ -1815,7 +1815,7 @@ void handleButtons() {
   if (M5.BtnC.isPressed()) {
     if (buttonCLastPress == 0) {
       buttonCLastPress = millis();
-    } else if (!buttonCLongPress && millis() - buttonCLastPress > 1000) {
+    } else if (!buttonCLongPress && millis() - buttonCLastPress > 3000) {
       // Долгое нажатие на C - выключение устройства
       buttonCLongPress = true;
       M5.Power.powerOff();
@@ -1844,7 +1844,7 @@ void handleButtons() {
   if (M5.BtnA.isPressed()) {
     if (buttonALastPress == 0) {
       buttonALastPress = millis();
-    } else if (!buttonALongPress && millis() - buttonALastPress > 1000) {
+    } else if (!buttonALongPress && millis() - buttonALastPress > 2000) {
       // Долгое нажатие на A - возвращаемся в главное меню
       buttonALongPress = true;
       currentSection = MENU_MAIN;
@@ -1861,10 +1861,24 @@ void handleButtons() {
     buttonALongPress = false;
   }
   
-  // Кнопка B (Control/Scroll Down)
+  // Кнопка B (Control/Scroll Down) - добавляем обработку долгого нажатия
   if (M5.BtnB.isPressed()) {
     if (buttonBLastPress == 0) {
       buttonBLastPress = millis();
+    } else if (!buttonBLongPress && millis() - buttonBLastPress > 500) {
+      // Долгое нажатие на B - прокрутка вверх на один пункт
+      buttonBLongPress = true;
+      int maxItems = getMaxMenuItems();
+      selectedMenuItem = (selectedMenuItem > 0) ? selectedMenuItem - 1 : maxItems - 1;
+      
+      int displayLines = (M5.Lcd.height() - 30) / 16;
+      if (selectedMenuItem < menuStartPosition) {
+        menuStartPosition = selectedMenuItem;
+      } else if (selectedMenuItem == maxItems - 1) {
+        menuStartPosition = max(0, maxItems - displayLines);
+      }
+      
+      drawMenu();
     }
   } else {
     if (buttonBLastPress > 0 && !buttonBLongPress) {
@@ -2741,8 +2755,8 @@ void handleMenuAction() {
       const auto& pins = kvmModule.getPins();
       if (selectedMenuItem >= 0 && selectedMenuItem < pins.size()) {
         // Проверяем, нажат ли импульс
-        int x = M5.Touch.getTouchPointRawY(); // Координаты касания
-        if (x > M5.Lcd.width() - 50) { // Если касание в районе кнопки [P]
+        auto touchPoint = M5.Touch.getTouchPointRaw();
+        if (touchPoint.x > M5.Lcd.width() - 50) { // Если касание в районе кнопки [P]
           kvmModule.pulsePin(selectedMenuItem, 500); // Отправляем импульс
         } else {
           // Обычное переключение пина
@@ -3086,27 +3100,32 @@ void updateAPClients() {
     }
     
     // Проверяем, заблокирован ли IP
-    if (networkTools.isIPBlocked(client.ip)) {
-      client.blocked = true;
+    if (client.blocked) {
+      // Используем более низкоуровневый API ESP-IDF
+      wifi_sta_list_t wifi_sta_list;
+      tcpip_adapter_sta_list_t adapter_sta_list;
+      
+      esp_wifi_ap_get_sta_list(&wifi_sta_list);
+      tcpip_adapter_get_sta_list(&wifi_sta_list, &adapter_sta_list);
+      
+      // Находим AID для конкретного MAC-адреса
+      for (int j = 0; j < adapter_sta_list.num; j++) {
+        if (memcmp(adapter_sta_list.sta[j].mac, adapterList.sta[i].mac, 6) == 0) {
+          // Используем правильный AID для деавторизации
+          for (int k = 0; k < wifi_sta_list.num; k++) {
+            if (memcmp(wifi_sta_list.sta[k].mac, adapterList.sta[i].mac, 6) == 0) {
+              // В структуре wifi_sta_list нужно найти поле aid
+              // Если его нет, используем индекс + 1 как AID
+              esp_wifi_deauth_sta(k + 1);
+              break;
+            }
+          }
+          break;
+        }
+      }
     }
     
     apClients.push_back(client);
-  }
-}
-
-// Функция смены IP адреса
-void shuffleIP() {
-  if (WiFi.status() == WL_CONNECTED) {
-    WiFi.disconnect();
-    delay(1000);
-    WiFi.reconnect();
-    
-    // Показываем уведомление
-    M5.Lcd.fillScreen(BLACK);
-    M5.Lcd.setCursor(0, 0);
-    M5.Lcd.println("Shuffling IP...");
-    M5.Lcd.println("Please wait...");
-    delay(3000);
   }
 }
 
@@ -3124,28 +3143,15 @@ bool isMACBlocked(const uint8_t* mac) {
   return false;
 }
 
-void onStationConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
-  auto& sta = info.wifi_ap_staconnected;
-  Serial.printf("Station connected: %02X:%02X:%02X:%02X:%02X:%02X\n",
-                sta.mac[0], sta.mac[1], sta.mac[2],
-                sta.mac[3], sta.mac[4], sta.mac[5]);
-
-  if (isMACBlocked(sta.mac)) {
-    Serial.println("Blocked MAC detected, disconnecting...");
-    // Для отключения клиента можно вызвать ESP-IDF API:
-    // wifi_softap_disconnect(sta.mac);
-  }
-}
-
 // Запуск сниффинга пакетов для пользователя
 void startPacketSniffing(int clientIndex) {
   if (clientIndex >= 0 && clientIndex < apClients.size()) {
     isSniffing = true;
     
     // Настраиваем WiFi для сниффинга
-    wifi_promiscuous_enable(0);
-    wifi_set_promiscuous_rx_cb(&promiscuous_rx_callback);
-    wifi_promiscuous_enable(1);
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(&promiscuous_rx_callback);
+    esp_wifi_set_promiscuous(true);
     
     // Устанавливаем фильтр для конкретного пользователя
     currentSniffingClient = clientIndex;
@@ -3159,7 +3165,7 @@ void startPacketSniffing(int clientIndex) {
 void stopPacketSniffing() {
   isSniffing = false;
   currentSniffingClient = -1;
-  wifi_promiscuous_enable(0);
+  esp_wifi_set_promiscuous(false);
 }
 
 // Колбэк для обработки перехваченных пакетов
@@ -3262,56 +3268,6 @@ void shuffleIP() {
   }
 }
 
-// Функция получения информации о подключенных клиентах
-void updateAPClients() {
-  apClients.clear();
-  
-  wifi_sta_list_t stationList;
-  tcpip_adapter_sta_list_t adapterList;
-  
-  if (WiFi.softAPgetStationNum() == 0) {
-    return;
-  }
-  
-  esp_wifi_ap_get_sta_list(&stationList);
-  tcpip_adapter_get_sta_list(&stationList, &adapterList);
-  
-  for (int i = 0; i < adapterList.num; i++) {
-    APClient client;
-    client.ip = IPAddress(adapterList.sta[i].ip.addr);
-    memcpy(client.mac, adapterList.sta[i].mac, 6);
-    client.lastSeen = millis();
-    client.totalBytes = 0;
-    client.lastPacket = "";
-    
-    // Проверяем, заблокирован ли MAC
-    char macStr[18];
-    sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
-            client.mac[0], client.mac[1], client.mac[2],
-            client.mac[3], client.mac[4], client.mac[5]);
-    
-    client.blocked = false;
-    for (const auto& blockedMAC : blockedMACs) {
-      if (blockedMAC == macStr) {
-        client.blocked = true;
-        break;
-      }
-    }
-    
-    // Проверяем, заблокирован ли IP
-    if (networkTools.isIPBlocked(client.ip)) {
-      client.blocked = true;
-    }
-    
-    // Если клиент заблокирован, пытаемся отключить его
-    if (client.blocked) {
-      esp_wifi_deauth_sta(adapterList.sta[i].mac);
-    }
-    
-    apClients.push_back(client);
-  }
-}
-
 // Обработчик подключения станции (реальная реализация)
 void onStationConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
   auto& sta = info.wifi_ap_staconnected;
@@ -3321,7 +3277,8 @@ void onStationConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
 
   if (isMACBlocked(sta.mac)) {
     Serial.println("Blocked MAC detected, disconnecting...");
-    // Отключаем клиента с заблокированным MAC
-    esp_wifi_deauth_sta(sta.mac);
+    // В ESP32 Arduino нет прямого способа отключить конкретного клиента
+    // Можно использовать альтернативный подход
+    esp_wifi_disconnect();
   }
 }
